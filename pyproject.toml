@@ -1,7 +1,7 @@
 [project]
 name = "match-hmda-sellers-and-purchasers"
 version = "0.1.0"
-description = "Add your description here"
+description = "Utilities for loading HMDA LAR data and building seller-purchaser crosswalks"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []
