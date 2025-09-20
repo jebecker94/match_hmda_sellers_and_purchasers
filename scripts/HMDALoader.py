@@ -1,162 +1,235 @@
 # -*- coding: utf-8 -*-
-"""
+"""HMDA delivery discovery and loading helpers.
+
 Created on Friday Jul 19 10:20:24 2024
 Updated On: Wednesday May 21 10:00:00 2025
-@author: Jonathan E. Becker
+
+The functions in this module expose a light-weight interface that allows the
+matching scripts to discover the most recent Loan/Application Register (LAR)
+deliveries stored in :mod:`config.DATA_DIR` and load them into pandas,
+PyArrow, or Polars data structures.  The helpers are deliberately typed to make
+downstream usage explicit and to surface path-handling mistakes early in the
+development cycle.
 """
 
+from __future__ import annotations
+
 # Import Packages
+from pathlib import Path
+from typing import Any, List, Literal, Optional, Sequence, Tuple, Union
+
 import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
+
 import config
-from typing import Union
+
+
+EngineName = Literal["pandas", "pyarrow", "polars"]
+FilterCondition = Tuple[str, str, object]
+ParquetFilters = Union[
+    Sequence[FilterCondition],
+    Sequence[Sequence[FilterCondition]],
+]
+PathLike = Union[str, Path]
 
 # Set Folder Paths
 DATA_DIR = config.DATA_DIR
 
-# Get List of HMDA Files
-def get_hmda_files(data_folder=DATA_DIR, file_type='lar', min_year=None, max_year=None, version_type=None, extension=None) :
-    """
-    Gets the list of most up-to-date HMDA files.
+def get_hmda_files(
+    data_folder: PathLike = DATA_DIR,
+    file_type: str = "lar",
+    min_year: Optional[int] = None,
+    max_year: Optional[int] = None,
+    version_type: Optional[str] = None,
+    extension: Optional[str] = None,
+) -> List[Path]:
+    """Return absolute paths to the latest HMDA deliveries.
 
     Parameters
     ----------
-    data_folder : str
-        The folder where the HMDA files are stored.
-    min_year : int, optional
-        The first year of HMDA files to return. The default is None.
-    max_year : int, optional
-        The last year of HMDA files to return. The default is None.
-    version_type : str, optional
-        The version type of HMDA files to return. The default is None.
-    extension : str, optional
-        The file extension of HMDA files to return. The default is None.
+    data_folder:
+        Base directory that contains the HMDA delivery folders along with the
+        ``file_list_hmda.csv`` manifest.  The value may be a :class:`~pathlib.Path`
+        instance or a string.
+    file_type:
+        HMDA file type to retrieve, typically ``"lar"`` for Loan/Application
+        Register extracts.  Case-insensitive.
+    min_year:
+        Lower bound for the delivery year (inclusive).  If ``None``, the
+        manifest is not filtered by a minimum year.
+    max_year:
+        Upper bound for the delivery year (inclusive).  If ``None``, the
+        manifest is not filtered by a maximum year.
+    version_type:
+        Optional version discriminator applied to the manifest ``VersionType``
+        column.  Pass ``None`` to keep all available versions.
+    extension:
+        Desired file extension (for example ``"parquet"`` or ``"csv.gz"``).  When
+        provided, the manifest is filtered using the corresponding indicator
+        column and returned paths include the extension.  A ``ValueError`` is
+        raised if the extension is not recognised.
 
     Returns
     -------
-    files : list
-        List of HMDA files.
-
+    list[pathlib.Path]
+        Absolute paths pointing to the most recent delivery for each year that
+        satisfies the supplied filters.  The list is ordered chronologically by
+        year.  If no rows satisfy the filters, an empty list is returned.
     """
 
-    # Path of File List
-    list_file = f'{data_folder}/file_list_hmda.csv'
+    data_dir = Path(data_folder)
+    list_file = data_dir / "file_list_hmda.csv"
 
-    # Load File List
     df = pd.read_csv(list_file)
 
-    # Filter by FileType
-    df = df.query(f'FileType.str.lower() == "{file_type.lower()}"')
+    df = df[df["FileType"].str.lower() == file_type.lower()].copy()
 
-    # Filter by Years
-    if min_year :
-        df = df.query(f'Year >= {min_year}')
-    if max_year :
-        df = df.query(f'Year <= {max_year}')
+    if min_year is not None:
+        df = df[df["Year"] >= min_year]
+    if max_year is not None:
+        df = df[df["Year"] <= max_year]
 
-    # Filter by Extension Type
-    if extension :
-        if extension.lower() == 'parquet' :
-            df = df.query('FileParquet==1')
-        if extension.lower() == 'csv.gz' :
-            df = df.query('FileCSVGZ==1')
-        if extension.lower() == 'dta' :
-            df = df.query('FileDTA==1')
+    if extension is not None:
+        extension_lower = extension.lower()
+        extension_flag_map = {
+            "parquet": "FileParquet",
+            "csv.gz": "FileCSVGZ",
+            "dta": "FileDTA",
+        }
+        try:
+            extension_column = extension_flag_map[extension_lower]
+        except KeyError as exc:  # pragma: no cover - defensive programming
+            raise ValueError(
+                f"Unsupported extension '{extension}'. "
+                "Expected one of: parquet, csv.gz, dta"
+            ) from exc
+        df = df[df[extension_column] == 1]
 
-    # Filter by Version Type
-    if version_type :
-        df = df.query(f'VersionType == {version_type}')
+    if version_type is not None:
+        df = df[df["VersionType"] == version_type]
 
-    # Keep Most Recent File For Each Year
-    df = df.drop_duplicates(subset=['Year'], keep='first')
-    
-    # Sort by Year
-    df = df.sort_values(by=['Year'])
+    df = df.drop_duplicates(subset=["Year"], keep="first")
+    df = df.sort_values(by=["Year"])
 
-    # Get File Names And Add Extensions
-    folders = list(df.FolderName)
-    files = list(df.FilePrefix)
-    if extension :
-        files = [f'{x}/{y}.{extension}' for x,y in zip(folders,files)]
+    files: List[Path] = []
+    for folder_name, prefix in zip(df["FolderName"], df["FilePrefix"]):
+        base_path = data_dir / folder_name
+        if extension is None:
+            files.append(base_path / prefix)
+        else:
+            files.append(base_path / f"{prefix}.{extension}")
 
-    # Return File List
     return files
 
 # Load HMDA Files
 def load_hmda_file(
-    data_folder=DATA_DIR,
-    file_type='lar',
-    min_year=2018,
-    max_year=2023,
-    columns=None,
-    filters=None,
-    verbose=False,
-    engine='pandas',
-    **kwargs,
-) -> Union[pd.DataFrame, pl.LazyFrame, pl.DataFrame, pa.Table] :
-    """
-    Load HMDA files.
-
-    Note that in orrder to load files efficiently, we use only parquet formats. Other formats are not supported at this time, but may be implemented later.
+    data_folder: PathLike = DATA_DIR,
+    file_type: str = "lar",
+    min_year: int = 2018,
+    max_year: int = 2023,
+    columns: Optional[Sequence[str]] = None,
+    filters: Optional[ParquetFilters] = None,
+    verbose: bool = False,
+    engine: EngineName = "pandas",
+    **kwargs: Any,
+) -> Union[pd.DataFrame, pl.LazyFrame, pl.DataFrame, pa.Table]:
+    """Load one or more HMDA parquet deliveries into a tabular object.
 
     Parameters
     ----------
-    data_folder : str
-        The folder where the HMDA files are stored.
-    file_type : str, optional
-        The type of HMDA file to load. The default is 'lar'.
-    min_year : int, optional
-            The first year of HMDA files to load. The default is 2018.
-    max_year : int, optional
-            The last year of HMDA files to load. The default is 2023.
-    columns : list, optional
-        The columns to load. The default is None.
-    filters : list, optional
-        The filters to apply. The default is None.
-    verbose : bool, optional
-        Whether to print progress messages. The default is False.
-    engine : str, optional
-        The engine to use for loading the data, either 'pandas', 'polars', or 'pyarrow'. The default is 'pandas'.
-    **kwargs : optional
-        Additional arguments to pass to pd.read_parquet.
-        
+    data_folder:
+        Directory containing the HMDA deliveries and manifest.  See
+        :func:`get_hmda_files` for expectations.
+    file_type:
+        HMDA file type to load (for example ``"lar"``).  The manifest is filtered
+        case-insensitively.
+    min_year, max_year:
+        Inclusive bounds for the delivery years to load.  The default range
+        mirrors the post-2018 HMDA era.
+    columns:
+        Optional list of column names to materialise.  When omitted, the full
+        schema is read.
+    filters:
+        Optional predicate passed through to :func:`pandas.read_parquet` or
+        :func:`pyarrow.parquet.read_table`.  The structure should follow the
+        [PyArrow filter specification](https://arrow.apache.org/docs/python/parquet.html#filters).
+    verbose:
+        If ``True``, the function prints the path of each file before it is
+        loaded.
+    engine:
+        Backend used to materialise the parquet data.  ``"pandas"`` returns a
+        :class:`pandas.DataFrame`, ``"pyarrow"`` returns a :class:`pyarrow.Table`,
+        and ``"polars"`` returns a concatenated :class:`polars.LazyFrame` or
+        :class:`polars.DataFrame` depending on ``kwargs``.
+    **kwargs:
+        Additional keyword arguments forwarded to the selected engine's parquet
+        reader.
+
     Returns
     -------
-    df : DataFrame
-        The loaded HMDA file.
+    pandas.DataFrame | polars.LazyFrame | polars.DataFrame | pyarrow.Table
+        Object containing the concatenated deliveries.
 
+    Raises
+    ------
+    FileNotFoundError
+        If the manifest filters produce no matching files.
+    ValueError
+        If ``engine`` is not one of the supported options.
     """
-    
-    # Get HMDA Files
-    files = get_hmda_files(data_folder=data_folder, file_type=file_type, min_year=min_year, max_year=max_year, extension='parquet')
 
-    # Load File
-    df = []
-    if engine=='pandas':
-        for file in files :
-            if verbose :
-                print('Adding data from file:', file)
-            df_a = pd.read_parquet(file, columns=columns, filters=filters, **kwargs) # Note: Filters must be passed in pyarrow/pandas format
-            df.append(df_a)
-        df = pd.concat(df)
-    if engine=='pyarrow':
-        for file in files :
-            if verbose :
-                print('Adding data from file:', file)
-            df_a = pq.read_table(file, columns=columns, filters=filters, **kwargs) # Note: Filters must be passed in pyarrow/pandas format
-            df.append(df_a)
-        df = pa.concat_tables(df)
-    if engine=='polars':
-        for file in files :
-            if verbose :
-                print('Adding data from file:', file)
-            df_a = pl.scan_parquet(file, **kwargs) # Note: We'll default to lazy loading when using polars
-            # df_a = df_a.filter(filters) # Note: Filters must be passed in polars format
-            # df_a = df_a.select(columns)
-            df.append(df_a)
-        df = pl.concat(df)
+    files = get_hmda_files(
+        data_folder=data_folder,
+        file_type=file_type,
+        min_year=min_year,
+        max_year=max_year,
+        extension="parquet",
+    )
 
-    # Return DataFrame
-    return df
+    if not files:
+        raise FileNotFoundError(
+            "No HMDA files matched the supplied filters. Verify that the "
+            "manifest is up to date and the year bounds are correct."
+        )
+
+    tables: List[Union[pd.DataFrame, pa.Table, pl.DataFrame, pl.LazyFrame]] = []
+
+    if engine == "pandas":
+        for file_path in files:
+            if verbose:
+                print("Adding data from file:", file_path)
+            table = pd.read_parquet(
+                file_path,
+                columns=list(columns) if columns is not None else None,
+                filters=filters,
+                **kwargs,
+            )
+            tables.append(table)
+        return pd.concat(tables, ignore_index=True)
+
+    if engine == "pyarrow":
+        for file_path in files:
+            if verbose:
+                print("Adding data from file:", file_path)
+            table = pq.read_table(
+                file_path,
+                columns=list(columns) if columns is not None else None,
+                filters=filters,
+                **kwargs,
+            )
+            tables.append(table)
+        return pa.concat_tables(tables)
+
+    if engine == "polars":
+        for file_path in files:
+            if verbose:
+                print("Adding data from file:", file_path)
+            table = pl.scan_parquet(str(file_path), **kwargs)
+            tables.append(table)
+        return pl.concat(tables)
+
+    raise ValueError(
+        f"Unsupported engine '{engine}'. Expected one of: pandas, pyarrow, polars"
+    )
