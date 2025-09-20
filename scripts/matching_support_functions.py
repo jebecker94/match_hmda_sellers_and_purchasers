@@ -1,25 +1,31 @@
 # Import Packages
-import pandas as pd
+from __future__ import annotations
+
+import os
+from typing import Mapping, Optional, Sequence
+
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
 import HMDALoader
 
+FilterCondition = tuple[str, str, object]
+
 # Get Match Columns
-def get_match_columns(file) :
-    """
-    Get columns used for matching.
+def get_match_columns(file: str | os.PathLike[str]) -> list[str] :
+    """Read the HMDA parquet metadata to identify usable match columns.
 
     Parameters
     ----------
-    file : str
+    file : str or os.PathLike[str]
         File to load for columns.
 
     Returns
     -------
-    columns : list
-        Columns used for matching.
-
+    list[str]
+        Column names that should be retained for matching routines.
     """
 
     # Load File Column Names
@@ -61,10 +67,13 @@ def get_match_columns(file) :
     return columns
 
 # Load HMDA Data
-def load_data(data_folder, min_year=2018, max_year=2023, added_filters=[]) :
-    """
-    Combine HMDA data after 2018, keeping originations and purchases only. For
-    use primarily in matching after the first round.
+def load_data(
+    data_folder: str,
+    min_year: int = 2018,
+    max_year: int = 2023,
+    added_filters: Optional[Sequence[FilterCondition]] = None,
+) -> pd.DataFrame :
+    """Combine HMDA data files and keep only originations and purchases.
 
     Parameters
     ----------
@@ -74,47 +83,49 @@ def load_data(data_folder, min_year=2018, max_year=2023, added_filters=[]) :
         Minimum year of data to include (inclusive). The default is 2018.
     max_year : int, optional
         Maximum year of data to include (inclusive). The default is 2023.
+    added_filters : Sequence[tuple[str, str, object]], optional
+        Additional pyarrow filter tuples to apply when reading the parquet
+        files. Each filter follows the (column, operator, value) convention
+        expected by :func:`pandas.read_parquet`.
 
     Returns
     -------
-    df : pandas DataFrame
-        Combined HMDA data.
-
+    pandas.DataFrame
+        Combined HMDA data covering the requested years.
     """
 
     # Set Filters
-    hmda_filters = [('action_taken','in',[1,6])]
-    hmda_filters += added_filters
+    hmda_filters: list[FilterCondition] = [('action_taken','in',[1,6])]
+    if added_filters is not None :
+        hmda_filters += list(added_filters)
 
     # Combine Seller and Purchaser Data
-    df = []
+    df_list = []
     for year in range(min_year, max_year+1) :
         file = HMDALoader.get_hmda_files(data_folder, min_year=year, max_year=year, extension='parquet')[0]
         hmda_columns = get_match_columns(file)
         df_a = pd.read_parquet(file, columns=hmda_columns, filters=hmda_filters)
         df_a = df_a.query('purchaser_type not in [1,2,3,4] | action_taken == 6')
-        df.append(df_a)
+        df_list.append(df_a)
         del df_a
-    df = pd.concat(df)
+    df = pd.concat(df_list)
 
     # Return DataFrame
     return df
 
 # Replace Missing Values
-def replace_missing_values(df) :
-    """
-    Replace missing numerics with NoneTypes.
+def replace_missing_values(df: pd.DataFrame) -> pd.DataFrame :
+    """Replace numeric sentinel codes with ``None`` for easier comparisons.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data with numerics for missing values.
 
     Returns
     -------
-    df : pandas DataFrame
+    pandas.DataFrame
         Data with NoneTypes for missing values.
-
     """
 
     # Note Loans Exempt from Fee Reporting
@@ -162,20 +173,19 @@ def replace_missing_values(df) :
     return df
 
 # Convert Numerics
-def convert_numerics(df) :
-    """
-    Destring numeric HMDA variables after 2018.
+def convert_numerics(df: pd.DataFrame) -> pd.DataFrame :
+    """Cast HMDA string codes to numeric dtypes where applicable.
 
     Parameters
     ----------
-    df : pandas DataFrame
-        DESCRIPTION.
+    df : pandas.DataFrame
+        Raw HMDA data where many numeric fields are represented as strings.
 
     Returns
     -------
-    df : pandas DataFrame
-        DESCRIPTION.
-
+    pandas.DataFrame
+        Data frame with numeric columns converted to ``float``/``int`` types
+        when possible.
     """
 
     # Replace Exempt w/ -99999
@@ -292,22 +302,20 @@ def convert_numerics(df) :
     return df
 
 # Keep Only Observations with Potential Matches on Match Columns
-def keep_potential_matches(df, match_columns) :
-    """
-    Before splitting, keep only loans which have at least one candidate match.
+def keep_potential_matches(df: pd.DataFrame, match_columns: Sequence[str]) -> pd.DataFrame :
+    """Filter to loans that have at least one potential counterpart.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data.
-    match_columns : list
+    match_columns : Sequence[str]
         Columns for match.
 
     Returns
     -------
-    df : pandas DataFrame
+    pandas.DataFrame
         Data with only observations that have potential match.
-
     """
 
     # Keep Potential Matches Based on County or Census Tract
@@ -324,31 +332,37 @@ def keep_potential_matches(df, match_columns) :
     return df
 
 # Split Sellers and Purchasers
-def split_sellers_and_purchasers(df, crosswalk_folder, match_round=1, file_suffix=None) :
-    """
-    Split data into sellers and purchasers.
+def split_sellers_and_purchasers(
+    df: pd.DataFrame,
+    crosswalk_folder: str,
+    match_round: int = 1,
+    file_suffix: Optional[str] = None,
+) -> tuple[pd.DataFrame, pd.DataFrame] :
+    """Split the pooled HMDA data into seller and purchaser subsets.
 
     Parameters
     ----------
-    df : TYPE
-        DESCRIPTION.
-    cw : TYPE, optional
-        DESCRIPTION. The default is None.
+    df : pandas.DataFrame
+        Matched seller and purchaser candidates in long form.
+    crosswalk_folder : str
+        Directory containing previously generated match crosswalks.
+    match_round : int, optional
+        Match iteration. Rounds above one drop prior matches. The default is 1.
+    file_suffix : str, optional
+        Optional suffix appended to crosswalk filenames.
 
     Returns
     -------
-    df_seller : TYPE
-        DESCRIPTION.
-    df_purchaser : TYPE
-        DESCRIPTION.
-
+    tuple[pandas.DataFrame, pandas.DataFrame]
+        Seller observations followed by purchaser observations.
     """
 
     # If Crosswalk is Provided, Drop Existing Matches
     if match_round > 1 :
 
         # Load Crosswalk
-        cw = pq.read_table(f'{crosswalk_folder}/hmda_seller_purchaser_matches_round{match_round-1}{file_suffix}.parquet')
+        suffix = file_suffix or ""
+        cw = pq.read_table(f'{crosswalk_folder}/hmda_seller_purchaser_matches_round{match_round-1}{suffix}.parquet')
 
         # Drop Sellers and Purchasers Already Matched
         df = pa.Table.from_pandas(df, preserve_index=False, safe=False)
@@ -365,20 +379,18 @@ def split_sellers_and_purchasers(df, crosswalk_folder, match_round=1, file_suffi
     return df_seller, df_purchaser
 
 # Match Sex
-def match_sex(df) :
-    """
-    Match on Applicant and Co-applicant Sex.
+def match_sex(df: pd.DataFrame) -> pd.DataFrame :
+    """Drop candidate pairs that conflict on applicant or co-applicant sex.
 
     Parameters
     ----------
-    df : pandas DataFrame
-        DESCRIPTION.
+    df : pandas.DataFrame
+        Candidate seller/purchaser combinations.
 
     Returns
     -------
-    df : pandas DataFrame
-        DESCRIPTION.
-
+    pandas.DataFrame
+        Candidate pairs where the reported sex codes are compatible.
     """
     
     # Replace Mismatches on Applicant and Co-Applicant Sex
@@ -398,20 +410,18 @@ def match_sex(df) :
     return df
 
 # Match Age
-def match_age(df) :
-    """
-    Match on Applicant and Co-applicant Age.
+def match_age(df: pd.DataFrame) -> pd.DataFrame :
+    """Drop candidate pairs that conflict on applicant or co-applicant age.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data with unmatched ages.
 
     Returns
     -------
-    df : pandas DataFrame
+    pandas.DataFrame
         Data with matched ages.
-
     """
     
     # Replace Mismatches on Applicant and Co-Applicant Sex
@@ -426,20 +436,21 @@ def match_age(df) :
     return df
 
 # Match Race
-def match_race(df, strict = False) :
-    """
-    Perform race matches
+def match_race(df: pd.DataFrame, strict: bool = False) -> pd.DataFrame :
+    """Apply a series of race-based consistency checks to candidate matches.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data with unmatched races.
+    strict : bool, optional
+        Whether to require exact matches on the primary race field. The
+        default is ``False``.
 
     Returns
     -------
-    df : pandas DataFrame
+    pandas.DataFrame
         Data with matched races.
-
     """
 
     # Replace Race Subcategories
@@ -471,20 +482,21 @@ def match_race(df, strict = False) :
     return df
 
 # Match Ethnicity
-def match_ethnicity(df, strict = False) :
-    """
-    Perform ethnicity matches
+def match_ethnicity(df: pd.DataFrame, strict: bool = False) -> pd.DataFrame :
+    """Apply a series of ethnicity-based consistency checks to candidates.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data with unmatched ethnicities.
+    strict : bool, optional
+        Whether to require exact matches on the primary ethnicity field. The
+        default is ``False``.
 
     Returns
     -------
-    df : pandas DataFrame
+    pandas.DataFrame
         Data with matched ethnicities.
-
     """
 
     # Replace Race Subcategories
@@ -514,20 +526,18 @@ def match_ethnicity(df, strict = False) :
     return df
 
 # Perform Numeric Matches
-def perform_income_matches(df) :
-    """
-    Matches with alternative income variables.
+def perform_income_matches(df: pd.DataFrame) -> pd.DataFrame :
+    """Create auxiliary income fields to support tolerant matching rules.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data before income differences are removed.
 
     Returns
     -------
-    df : ppandas DataFrame
+    pandas.DataFrame
         Data after income differences are removed.
-
     """
 
     # Alternative Income Variables
@@ -549,26 +559,29 @@ def perform_income_matches(df) :
     return df
 
 # Numeric Matches
-def numeric_matches(df, match_tolerances, verbose = False, drop_differences = True) :
-    """
-    Matches for numeric columns.
+def numeric_matches(
+    df: pd.DataFrame,
+    match_tolerances: Mapping[str, float | int],
+    verbose: bool = False,
+    drop_differences: bool = True,
+) -> pd.DataFrame :
+    """Keep only records that agree within provided numeric tolerances.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data.
-    match_tolerances : dictionary
+    match_tolerances : Mapping[str, float | int]
         Dictionary of match columns and tolerances.
-    verbose : boolean, optional
+    verbose : bool, optional
         Whether to display number of dropped observations. The default is False.
-    drop_differences : boolean, optional
+    drop_differences : bool, optional
         Whether to drop the created value differences. The default is True.
 
     Returns
     -------
-    df : pandas DataFrame
+    pandas.DataFrame
         Data.
-
     """
 
     # Drop One Column at a Time
@@ -598,26 +611,29 @@ def numeric_matches(df, match_tolerances, verbose = False, drop_differences = Tr
     return df
 
 # Numeric Matches
-def weak_numeric_matches(df, match_tolerances, verbose = False, drop_differences = True) :
-    """
-    Matches for numeric columns.
+def weak_numeric_matches(
+    df: pd.DataFrame,
+    match_tolerances: Mapping[str, float | int],
+    verbose: bool = False,
+    drop_differences: bool = True,
+) -> pd.DataFrame :
+    """Allow slight numeric disagreement while preserving best matches.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data.
-    match_tolerances : dictionary
+    match_tolerances : Mapping[str, float | int]
         Dictionary of match columns and tolerances.
-    verbose : boolean, optional
+    verbose : bool, optional
         Whether to display number of dropped observations. The default is False.
-    drop_differences : boolean, optional
+    drop_differences : bool, optional
         Whether to drop the created value differences. The default is True.
 
     Returns
     -------
-    df : pandas DataFrame
+    pandas.DataFrame
         Data.
-
     """
 
     # Drop One Column at a Time
@@ -652,26 +668,29 @@ def weak_numeric_matches(df, match_tolerances, verbose = False, drop_differences
     return df
 
 # Numeric Matches after Uniques
-def numeric_matches_post_unique(df, match_tolerances, verbose = False, drop_differences = True) :
-    """
-    Matches for numeric columns.
+def numeric_matches_post_unique(
+    df: pd.DataFrame,
+    match_tolerances: Mapping[str, float | int],
+    verbose: bool = False,
+    drop_differences: bool = True,
+) -> pd.DataFrame :
+    """Re-apply numeric tolerances after enforcing uniqueness constraints.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data.
-    match_tolerances : dictionary
+    match_tolerances : Mapping[str, float | int]
         Dictionary of match columns and tolerances.
-    verbose : boolean, optional
+    verbose : bool, optional
         Whether to display number of dropped observations. The default is False.
-    drop_differences : boolean, optional
+    drop_differences : bool, optional
         Whether to drop the created value differences. The default is True.
 
     Returns
     -------
-    df : pandas DataFrame
+    pandas.DataFrame
         Data.
-
     """
     
     # Count for Dropped Observations
@@ -705,20 +724,18 @@ def numeric_matches_post_unique(df, match_tolerances, verbose = False, drop_diff
     return df
 
 # Perform Fee Matches
-def perform_fee_matches(df) :
-    """
-    Count the number of fee variables with nonmissing values and matches.
+def perform_fee_matches(df: pd.DataFrame) -> pd.DataFrame :
+    """Count non-missing fee variables and flag matching fee structures.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data without match or nonmissing counts.
 
     Returns
     -------
-    df : pandas DataFrame
+    pandas.DataFrame
         Data with match and nonmissing counts.
-
     """
 
     # Initialize Fee Match Variables
@@ -742,25 +759,22 @@ def perform_fee_matches(df) :
     return df
 
 # Keep Uniques
-def keep_uniques(df, one_to_one = True, verbose = True) :
-    """
-    Keep unique matches or matches where a single origination matches to many
-    purchasers where one purchaser has a secondary sale.
+def keep_uniques(df: pd.DataFrame, one_to_one: bool = True, verbose: bool = True) -> pd.DataFrame :
+    """Restrict matches so each purchaser links to a single sale.
 
     Parameters
     ----------
-    df : pandas DataFrame
+    df : pandas.DataFrame
         Data before unique matches are enforced.
-    one_to_one : Boolean, optional
+    one_to_one : bool, optional
         Whether to only keep unique seller matches. The default is True.
-    verbose : Boolean, optional
+    verbose : bool, optional
         Whether to display match counts before dropping. The default is True.
 
     Returns
     -------
-    df : pandas DataFrame
+    pandas.DataFrame
         Data after unique matches are enforced.
-
     """
 
     # Keep Unique Loans
@@ -794,29 +808,36 @@ def keep_uniques(df, one_to_one = True, verbose = True) :
     return df
 
 # Save Crosswalk
-def save_crosswalk(df, save_folder, match_round = 1, file_suffix=None) :
-    """
-    Create and save a crosswalk from the data.
+def save_crosswalk(
+    df: pd.DataFrame,
+    save_folder: str,
+    match_round: int = 1,
+    file_suffix: Optional[str] = None,
+) -> None :
+    """Persist the current set of matches to a parquet crosswalk file.
 
     Parameters
     ----------
-    df : TYPE
-        DESCRIPTION.
-    save_folder : TYPE
-        DESCRIPTION.
-    match_round : TYPE, optional
-        DESCRIPTION. The default is 1.
+    df : pandas.DataFrame
+        Data containing seller and purchaser HMDA indices.
+    save_folder : str
+        Destination directory for the crosswalk parquet file.
+    match_round : int, optional
+        Iteration number indicating which matching round produced the crosswalk.
+        The default is 1.
+    file_suffix : str, optional
+        Optional suffix appended to crosswalk filenames.
 
     Returns
     -------
-    None.
-
+    None
     """
     
     # Add Previous Round Crosswalk
     cw = []
     if match_round > 1 :
-        cw.append(pq.read_table(f'{save_folder}/hmda_seller_purchaser_matches_round{match_round-1}{file_suffix}.parquet').to_pandas())
+        suffix = file_suffix or ""
+        cw.append(pq.read_table(f'{save_folder}/hmda_seller_purchaser_matches_round{match_round-1}{suffix}.parquet').to_pandas())
 
     # Extract HMDA Index variables    
     cw_a = df[['HMDAIndex_s','HMDAIndex_p']]
@@ -831,4 +852,5 @@ def save_crosswalk(df, save_folder, match_round = 1, file_suffix=None) :
     # Save Crosswalk
     print(cw.match_round.value_counts())
     cw = pa.Table.from_pandas(cw, preserve_index=False)
-    pq.write_table(cw, f'{save_folder}/hmda_seller_purchaser_matches_round{match_round}{file_suffix}.parquet')
+    suffix = file_suffix or ""
+    pq.write_table(cw, f'{save_folder}/hmda_seller_purchaser_matches_round{match_round}{suffix}.parquet')
