@@ -79,11 +79,11 @@ def match_hmda_sellers_purchasers_round1(data_folder, save_folder, min_year=2018
             'income': 1,
             'interest_rate': .0625,
         }
-        df_a = numeric_matches(df_a, match_tolerances, verbose=False)
+        df_a = numeric_matches(df_a, match_tolerances)
 
         # Weak Numeric Matches
         match_tolerances = {'interest_rate': .01}
-        df_a = weak_numeric_matches(df_a, match_tolerances, verbose=True)
+        df_a = weak_numeric_matches(df_a, match_tolerances)
 
         # Check for Matches On Any Fee Variables
         df_a = perform_fee_matches(df_a)
@@ -116,7 +116,7 @@ def match_hmda_sellers_purchasers_round1(data_folder, save_folder, min_year=2018
             'applicant_age_above_62': 0,
             'co_applicant_age_above_62': 0,
         }
-        df_a = numeric_matches(df_a, match_tolerances, verbose=True)
+        df_a = numeric_matches(df_a, match_tolerances)
 
         # Clean Up
         df_a['i_DropObservation'] = (np.abs(df_a['interest_rate_s'] - df_a['interest_rate_p']) >= .005) | pd.isna(df_a['income_s']) | pd.isna(df_a['interest_rate_s']) | pd.isna(df_a['property_value_s'])
@@ -174,11 +174,11 @@ def match_hmda_sellers_purchasers_round2(data_folder, save_folder, min_year=2018
     match_tolerances = {'income': 1,
                         'interest_rate': .0625,
                         }
-    df = numeric_matches(df, match_tolerances, verbose=True)
+    df = numeric_matches(df, match_tolerances)
 
     # Weak Numeric Matches
     match_tolerances = {'interest_rate': .01}
-    df = weak_numeric_matches(df, match_tolerances, verbose=True)
+    df = weak_numeric_matches(df, match_tolerances)
 
     # Check for Matches On Any Fee Variables
     df = perform_fee_matches(df)
@@ -210,7 +210,7 @@ def match_hmda_sellers_purchasers_round2(data_folder, save_folder, min_year=2018
                         'applicant_age_above_62': 0,
                         'co_applicant_age_above_62': 0,
                         }
-    df = numeric_matches(df, match_tolerances, verbose=True)
+    df = numeric_matches(df, match_tolerances)
 
     # Clean Up
     df['i_DropObservation'] = (np.abs(df['interest_rate_s'] - df['interest_rate_p']) >= .005) | pd.isna(df['income_s']) | pd.isna(df['interest_rate_s']) | pd.isna(df['property_value_s'])
@@ -276,7 +276,7 @@ def match_hmda_sellers_purchasers_round3(data_folder, save_folder, min_year=2018
                         'open_end_line_of_credit': 0,
                         'total_units': 0,
                         }
-    df = numeric_matches(df, match_tolerances, verbose=True)
+    df = numeric_matches(df, match_tolerances)
 
     # Age, Sex, Ethnicity, and Race Matches
     df = match_age(df)
@@ -290,7 +290,7 @@ def match_hmda_sellers_purchasers_round3(data_folder, save_folder, min_year=2018
 
     # Weak Numeric Matches
     match_tolerances = {'interest_rate': .01}
-    df = weak_numeric_matches(df, match_tolerances, verbose=True)
+    df = weak_numeric_matches(df, match_tolerances)
 
     # Keep Unique Matches
     df = keep_uniques(df, one_to_one=False)
@@ -301,13 +301,13 @@ def match_hmda_sellers_purchasers_round3(data_folder, save_folder, min_year=2018
                         'loan_term': 12,
                         'property_value': 20000,
                         }
-    df = numeric_matches_post_unique(df, match_tolerances, verbose=True)
+    df = numeric_matches_post_unique(df, match_tolerances)
 
     # Save Crosswalk
     save_crosswalk(df, save_folder, match_round=3, file_suffix=file_suffix)
 
 # Round 4: Match without Loan Purpose Match; Keep Tight Fee/Rate/Income Matches
-def match_hmda_sellers_purchasers_round4(data_folder, save_folder, min_year=2018, max_year=2023, verbose=False, file_suffix=None) :
+def match_hmda_sellers_purchasers_round4(data_folder, save_folder, min_year=2018, max_year=2023, file_suffix=None) :
     """
     Round 4 of seller-purchaser matches for 2018 onward.
 
@@ -321,8 +321,6 @@ def match_hmda_sellers_purchasers_round4(data_folder, save_folder, min_year=2018
         DESCRIPTION. The default is 2018.
     max_year : int, optional
         DESCRIPTION. The default is 2023.
-    verbose : boolean, optional
-        DESCRIPTION. The default is False.
 
     Returns
     -------
@@ -364,7 +362,7 @@ def match_hmda_sellers_purchasers_round4(data_folder, save_folder, min_year=2018
                         'open_end_line_of_credit': 0,
                         'total_units': 0,
                         }
-    df = numeric_matches(df, match_tolerances, verbose=True)
+    df = numeric_matches(df, match_tolerances)
 
     # Allow Non-matching refi types
     df = df.query('loan_purpose_s == loan_purpose_p | loan_purpose_s in [31,32] | loan_purpose_p in [31,32]')
@@ -381,7 +379,7 @@ def match_hmda_sellers_purchasers_round4(data_folder, save_folder, min_year=2018
 
     # Weak Numeric Matches
     match_tolerances = {'interest_rate': .01}
-    df = weak_numeric_matches(df, match_tolerances, verbose=True)
+    df = weak_numeric_matches(df, match_tolerances)
 
     # Keep Unique Matches
     df = keep_uniques(df, one_to_one=False)
@@ -392,13 +390,13 @@ def match_hmda_sellers_purchasers_round4(data_folder, save_folder, min_year=2018
                         'loan_term': 12,
                         'property_value': 20000,
                         }
-    df = numeric_matches_post_unique(df, match_tolerances, verbose=True)
+    df = numeric_matches_post_unique(df, match_tolerances)
 
     # Save Crosswalk
     save_crosswalk(df, save_folder, match_round=4, file_suffix=file_suffix)
     
 # Round 5: Allow for slight loan amount mismatches
-def match_hmda_sellers_purchasers_round5(data_folder, save_folder, min_year=2018, max_year=2023, verbose=False, file_suffix=None) :
+def match_hmda_sellers_purchasers_round5(data_folder, save_folder, min_year=2018, max_year=2023, file_suffix=None) :
     """
     Round 5 of seller-purchaser matches for 2018 onward.
 
@@ -412,8 +410,6 @@ def match_hmda_sellers_purchasers_round5(data_folder, save_folder, min_year=2018
         DESCRIPTION. The default is 2018.
     max_year : TYPE, optional
         DESCRIPTION. The default is 2022.
-    verbose : TYPE, optional
-        DESCRIPTION. The default is False.
 
     Returns
     -------
@@ -460,11 +456,11 @@ def match_hmda_sellers_purchasers_round5(data_folder, save_folder, min_year=2018
         match_tolerances = {'income': 1,
                             'interest_rate': .0625,
                             }
-        df_a = numeric_matches(df_a, match_tolerances, verbose=True)
+        df_a = numeric_matches(df_a, match_tolerances)
 
         # Weak Numeric Matches
         match_tolerances = {'interest_rate': .01}
-        df_a = weak_numeric_matches(df_a, match_tolerances, verbose=True)
+        df_a = weak_numeric_matches(df_a, match_tolerances)
 
         # Check for Matches On Any Fee Variables
         df_a = perform_fee_matches(df_a)
@@ -497,7 +493,7 @@ def match_hmda_sellers_purchasers_round5(data_folder, save_folder, min_year=2018
                             'co_applicant_age_above_62': 0,
                             'loan_amount': 10000,
                             }
-        df_a = numeric_matches(df_a, match_tolerances, verbose=True)
+        df_a = numeric_matches(df_a, match_tolerances)
         
         # Clean Up
         df_a['i_DropObservation'] = (np.abs(df_a['interest_rate_s'] - df_a['interest_rate_p']) >= .005) | pd.isna(df_a['income_s']) | pd.isna(df_a['interest_rate_s']) | pd.isna(df_a['property_value_s'])
@@ -522,7 +518,7 @@ def match_hmda_sellers_purchasers_round5(data_folder, save_folder, min_year=2018
     save_crosswalk(df, save_folder, match_round=5, file_suffix=file_suffix)
 
 # Round 6: Affiliate Matches
-def match_hmda_sellers_purchasers_round6(data_folder, save_folder, min_year=2018, max_year=2023, verbose=False, file_suffix=None) :
+def match_hmda_sellers_purchasers_round6(data_folder, save_folder, min_year=2018, max_year=2023, file_suffix=None) :
     """
     Round 5 of seller-purchaser matches for 2018 onward. Match for affiliates.
 
@@ -536,8 +532,6 @@ def match_hmda_sellers_purchasers_round6(data_folder, save_folder, min_year=2018
         DESCRIPTION. The default is 2018.
     max_year : TYPE, optional
         DESCRIPTION. The default is 2022.
-    verbose : TYPE, optional
-        DESCRIPTION. The default is False.
 
     Returns
     -------
@@ -583,7 +577,7 @@ def match_hmda_sellers_purchasers_round6(data_folder, save_folder, min_year=2018
                         'open_end_line_of_credit': 0,
                         'total_units': 0,
                         }
-    df = numeric_matches(df, match_tolerances, verbose = True)
+    df = numeric_matches(df, match_tolerances)
 
     # Allow Non-matching refi types
     df = df.query('loan_purpose_s == loan_purpose_p or loan_purpose_s in [31,32] or loan_purpose_p in [31,32]')
@@ -616,7 +610,7 @@ def match_hmda_sellers_purchasers_round6(data_folder, save_folder, min_year=2018
 
     # Weak Numeric Matches
     match_tolerances = {'interest_rate': .01}
-    df = weak_numeric_matches(df, match_tolerances, verbose=True)
+    df = weak_numeric_matches(df, match_tolerances)
 
     # Keep Only Affiliate Matches
     df = df.merge(affiliated_leis, on=['lei_s','lei_p'])
@@ -630,13 +624,13 @@ def match_hmda_sellers_purchasers_round6(data_folder, save_folder, min_year=2018
                         'loan_term': 12,
                         'property_value': 20000,
                         }
-    df = numeric_matches_post_unique(df, match_tolerances, verbose=True)
+    df = numeric_matches_post_unique(df, match_tolerances)
 
     # Save Crosswalk
     save_crosswalk(df, save_folder, match_round=6, file_suffix=file_suffix)
 
 # Round 7: Match with Purchaser Type
-def match_hmda_sellers_purchasers_round7(data_folder, save_folder, min_year=2018, max_year=2023, verbose=False, file_suffix=None) :
+def match_hmda_sellers_purchasers_round7(data_folder, save_folder, min_year=2018, max_year=2023, file_suffix=None) :
     """
     Round 7 of seller-purchaser matches for 2018 onward.
 
@@ -650,8 +644,6 @@ def match_hmda_sellers_purchasers_round7(data_folder, save_folder, min_year=2018
         DESCRIPTION. The default is 2018.
     max_year : TYPE, optional
         DESCRIPTION. The default is 2022.
-    verbose : TYPE, optional
-        DESCRIPTION. The default is False.
 
     Returns
     -------
@@ -709,7 +701,7 @@ def match_hmda_sellers_purchasers_round7(data_folder, save_folder, min_year=2018
                         'open_end_line_of_credit': 0,
                         'total_units': 0,
                         }
-    df = numeric_matches(df, match_tolerances, verbose=True)
+    df = numeric_matches(df, match_tolerances)
 
     # Age, Sex, Ethnicity, and Race Matches
     df = match_age(df)
@@ -755,13 +747,13 @@ def match_hmda_sellers_purchasers_round7(data_folder, save_folder, min_year=2018
                         'loan_term': 0,
                         'property_value': 10000,
                         }
-    df = numeric_matches_post_unique(df, match_tolerances, verbose=True)
+    df = numeric_matches_post_unique(df, match_tolerances)
 
     # Save Crosswalk
     save_crosswalk(df, save_folder, match_round=7, file_suffix=file_suffix)
 
 # Round 8: Match without PurchaserType=0 Originations
-def match_hmda_sellers_purchasers_round8(data_folder, save_folder, min_year=2018, max_year=2023, verbose=False, file_suffix=None) :
+def match_hmda_sellers_purchasers_round8(data_folder, save_folder, min_year=2018, max_year=2023, file_suffix=None) :
     """
     Round 8 of seller-purchaser matches for 2018 onward.
 
@@ -775,8 +767,6 @@ def match_hmda_sellers_purchasers_round8(data_folder, save_folder, min_year=2018
         DESCRIPTION. The default is 2018.
     max_year : TYPE, optional
         DESCRIPTION. The default is 2022.
-    verbose : TYPE, optional
-        DESCRIPTION. The default is False.
 
     Returns
     -------
@@ -835,7 +825,7 @@ def match_hmda_sellers_purchasers_round8(data_folder, save_folder, min_year=2018
                         'open_end_line_of_credit': 0,
                         'total_units': 0,
                         }
-    df = numeric_matches(df, match_tolerances, verbose=True)
+    df = numeric_matches(df, match_tolerances)
 
     # Age, Sex, Ethnicity, and Race Matches
     df = match_age(df)
@@ -881,7 +871,7 @@ def match_hmda_sellers_purchasers_round8(data_folder, save_folder, min_year=2018
                         'loan_term': 12,
                         'property_value': 30000,
                         }
-    df = numeric_matches_post_unique(df, match_tolerances, verbose=True)
+    df = numeric_matches_post_unique(df, match_tolerances)
 
     # Save Crosswalk
     save_crosswalk(df, save_folder, match_round=8, file_suffix=file_suffix)

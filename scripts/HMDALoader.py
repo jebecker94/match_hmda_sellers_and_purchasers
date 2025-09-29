@@ -136,7 +136,6 @@ def load_hmda_file(
     max_year: int = 2023,
     columns: Optional[Sequence[str]] = None,
     filters: Optional[ParquetFilters] = None,
-    verbose: bool = False,
     engine: EngineName = "pandas",
     **kwargs: Any,
 ) -> Union[pd.DataFrame, pl.LazyFrame, pl.DataFrame, pa.Table]:
@@ -160,9 +159,6 @@ def load_hmda_file(
         Optional predicate passed through to :func:`pandas.read_parquet` or
         :func:`pyarrow.parquet.read_table`.  The structure should follow the
         [PyArrow filter specification](https://arrow.apache.org/docs/python/parquet.html#filters).
-    verbose:
-        If ``True``, the function logs the path of each file before it is
-        loaded.
     engine:
         Backend used to materialise the parquet data.  ``"pandas"`` returns a
         :class:`pandas.DataFrame`, ``"pyarrow"`` returns a :class:`pyarrow.Table`,
@@ -203,8 +199,7 @@ def load_hmda_file(
 
     if engine == "pandas":
         for file_path in files:
-            if verbose:
-                logger.info("Adding data from file: %s", file_path)
+            logger.debug("Adding data from file: %s", file_path)
             table = pd.read_parquet(
                 file_path,
                 columns=list(columns) if columns is not None else None,
@@ -216,8 +211,7 @@ def load_hmda_file(
 
     if engine == "pyarrow":
         for file_path in files:
-            if verbose:
-                logger.info("Adding data from file: %s", file_path)
+            logger.debug("Adding data from file: %s", file_path)
             table = pq.read_table(
                 file_path,
                 columns=list(columns) if columns is not None else None,
@@ -229,8 +223,7 @@ def load_hmda_file(
 
     if engine == "polars":
         for file_path in files:
-            if verbose:
-                logger.info("Adding data from file: %s", file_path)
+            logger.debug("Adding data from file: %s", file_path)
             table = pl.scan_parquet(str(file_path), **kwargs)
             tables.append(table)
         return pl.concat(tables)
