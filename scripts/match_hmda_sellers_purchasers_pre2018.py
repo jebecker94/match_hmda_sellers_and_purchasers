@@ -66,7 +66,7 @@ def save_crosswalk(df, save_folder, match_round = 1) :
               )
     
 # Numeric Matches
-def numeric_matches(df, match_tolerances, verbose = False, drop_differences = True) :
+def numeric_matches(df, match_tolerances, drop_differences = True) :
     """
     Matches for numeric columns.
 
@@ -76,8 +76,6 @@ def numeric_matches(df, match_tolerances, verbose = False, drop_differences = Tr
         Data.
     match_tolerances : dictionary
         Dictionary of match columns and tolerances.
-    verbose : boolean, optional
-        Whether to display number of dropped observations. The default is False.
     drop_differences : boolean, optional
         Whether to drop the created value differences. The default is True.
 
@@ -100,12 +98,11 @@ def numeric_matches(df, match_tolerances, verbose = False, drop_differences = Tr
         df = df.loc[~(np.abs(df[f'{column}_difference']) > tolerance)]
         
         # Display Progress
-        if verbose :
-            logger.info(
-                "Matching on %s drops %d observations",
-                column,
-                start_obs - df.shape[0],
-            )
+        logger.debug(
+            "Matching on %s drops %d observations",
+            column,
+            start_obs - df.shape[0],
+        )
 
         # Drop Difference Columns
         if drop_differences :
@@ -294,7 +291,7 @@ def match_ethnicity(df) :
     return df
 
 # Keep Uniques
-def keep_uniques(df, one_to_one = True, verbose = True) :
+def keep_uniques(df, one_to_one = True) :
     """
     Keep unique matches or matches where a single origination matches to many
     purchasers where one purchaser has a secondary sale.
@@ -305,8 +302,6 @@ def keep_uniques(df, one_to_one = True, verbose = True) :
         Data before unique matches are enforced.
     one_to_one : Boolean, optional
         Whether to only keep unique seller matches. The default is True.
-    verbose : Boolean, optional
-        Whether to display match counts before dropping. The default is True.
 
     Returns
     -------
@@ -326,11 +321,10 @@ def keep_uniques(df, one_to_one = True, verbose = True) :
     df['count_index_p'] = df.groupby(loan_id_columns_p, dropna = False)['activity_year_p'].transform('count')
 
     # Display
-    if verbose :
-        logger.info(
-            "Match cardinality counts:\n%s",
-            df[['count_index_s', 'count_index_p']].value_counts(),
-        )
+    logger.debug(
+        "Match cardinality counts:\n%s",
+        df[['count_index_s', 'count_index_p']].value_counts(),
+    )
 
     # Keep Purchased Loans w/ Unique Match
     df = df.query('count_index_p == 1')
@@ -460,7 +454,7 @@ def match_hmda_sellers_purchasers_round1(data_folder, save_folder, min_year=2007
         df_a = df_a.query('respondent_id_s!=respondent_id_p | agency_code_s!=agency_code_p')
 
         # Keep Unique Loans
-        df_a = keep_uniques(df_a, one_to_one=True, verbose=True)
+        df_a = keep_uniques(df_a, one_to_one=True)
 
         # Keep Similar Loan Amounts and Incomes
         df_a['SizeDifference'] = df_a.loan_amount_s-df_a.loan_amount_p
@@ -603,7 +597,7 @@ def match_hmda_sellers_purchasers_round2(data_folder, save_folder, min_year = 20
     df = df.query('respondent_id_s!=respondent_id_p | agency_code_s!=agency_code_p')
 
     # Keep Unique Loans
-    df = keep_uniques(df, one_to_one=True, verbose=True)
+    df = keep_uniques(df, one_to_one=True)
     
     # Drop Demographic Mismatches
     df = match_sex(df)

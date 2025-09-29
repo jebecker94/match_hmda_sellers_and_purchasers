@@ -567,7 +567,6 @@ def perform_income_matches(df: pd.DataFrame) -> pd.DataFrame :
 def numeric_matches(
     df: pd.DataFrame,
     match_tolerances: Mapping[str, float | int],
-    verbose: bool = False,
     drop_differences: bool = True,
 ) -> pd.DataFrame :
     """Keep only records that agree within provided numeric tolerances.
@@ -578,8 +577,6 @@ def numeric_matches(
         Data.
     match_tolerances : Mapping[str, float | int]
         Dictionary of match columns and tolerances.
-    verbose : bool, optional
-        Whether to display number of dropped observations. The default is False.
     drop_differences : bool, optional
         Whether to drop the created value differences. The default is True.
 
@@ -605,12 +602,11 @@ def numeric_matches(
             df = df.query(f'abs({column}_difference) <= {tolerance} or {column}_difference.isnull()')
 
             # Display Progress
-            if verbose :
-                logger.info(
-                    "Matching on %s drops %d observations",
-                    column,
-                    start_obs - df.shape[0],
-                )
+            logger.debug(
+                "Matching on %s drops %d observations",
+                column,
+                start_obs - df.shape[0],
+            )
 
             # Drop Difference Columns
             if drop_differences :
@@ -623,7 +619,6 @@ def numeric_matches(
 def weak_numeric_matches(
     df: pd.DataFrame,
     match_tolerances: Mapping[str, float | int],
-    verbose: bool = False,
     drop_differences: bool = True,
 ) -> pd.DataFrame :
     """Allow slight numeric disagreement while preserving best matches.
@@ -634,8 +629,6 @@ def weak_numeric_matches(
         Data.
     match_tolerances : Mapping[str, float | int]
         Dictionary of match columns and tolerances.
-    verbose : bool, optional
-        Whether to display number of dropped observations. The default is False.
     drop_differences : bool, optional
         Whether to drop the created value differences. The default is True.
 
@@ -667,12 +660,11 @@ def weak_numeric_matches(
             df = df.loc[~(np.abs(df[f'{column}_difference']) > tolerance) | (df[f'min_{column}_difference_p'] > 0) | pd.isna(df[f'min_{column}_difference_p'])]
 
             # Display Progress
-            if verbose :
-                logger.info(
-                    "Matching weakly on %s drops %d observations",
-                    column,
-                    start_obs - df.shape[0],
-                )
+            logger.debug(
+                "Matching weakly on %s drops %d observations",
+                column,
+                start_obs - df.shape[0],
+            )
 
             # Drop Difference Columns
             if drop_differences :
@@ -684,7 +676,6 @@ def weak_numeric_matches(
 def numeric_matches_post_unique(
     df: pd.DataFrame,
     match_tolerances: Mapping[str, float | int],
-    verbose: bool = False,
     drop_differences: bool = True,
 ) -> pd.DataFrame :
     """Re-apply numeric tolerances after enforcing uniqueness constraints.
@@ -695,8 +686,6 @@ def numeric_matches_post_unique(
         Data.
     match_tolerances : Mapping[str, float | int]
         Dictionary of match columns and tolerances.
-    verbose : bool, optional
-        Whether to display number of dropped observations. The default is False.
     drop_differences : bool, optional
         Whether to drop the created value differences. The default is True.
 
@@ -730,11 +719,10 @@ def numeric_matches_post_unique(
     df = df.drop(columns = ['i_DropObservation','i_DropSale'])
 
     # Display Progress
-    if verbose :
-        logger.info(
-            "Numeric post-unique filtering removed %d observations",
-            start_obs - df.shape[0],
-        )
+    logger.debug(
+        "Numeric post-unique filtering removed %d observations",
+        start_obs - df.shape[0],
+    )
 
     # Return DataFrame
     return df
@@ -775,7 +763,7 @@ def perform_fee_matches(df: pd.DataFrame) -> pd.DataFrame :
     return df
 
 # Keep Uniques
-def keep_uniques(df: pd.DataFrame, one_to_one: bool = True, verbose: bool = True) -> pd.DataFrame :
+def keep_uniques(df: pd.DataFrame, one_to_one: bool = True) -> pd.DataFrame :
     """Restrict matches so each purchaser links to a single sale.
 
     Parameters
@@ -784,8 +772,6 @@ def keep_uniques(df: pd.DataFrame, one_to_one: bool = True, verbose: bool = True
         Data before unique matches are enforced.
     one_to_one : bool, optional
         Whether to only keep unique seller matches. The default is True.
-    verbose : bool, optional
-        Whether to display match counts before dropping. The default is True.
 
     Returns
     -------
@@ -798,11 +784,10 @@ def keep_uniques(df: pd.DataFrame, one_to_one: bool = True, verbose: bool = True
     df['count_index_p'] = df.groupby(['HMDAIndex_p'])['HMDAIndex_p'].transform('count')
 
     # Display
-    if verbose :
-        logger.info(
-            "Match cardinality counts:\n%s",
-            df[['count_index_s', 'count_index_p']].value_counts(),
-        )
+    logger.debug(
+        "Match cardinality counts:\n%s",
+        df[['count_index_s', 'count_index_p']].value_counts(),
+    )
 
     # Keep Purchased Loans w/ Unique Match
     df = df.query('count_index_p == 1')
