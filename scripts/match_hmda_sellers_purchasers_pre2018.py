@@ -8,11 +8,16 @@ Last updated on: Saturday March 22 07:45:00 2025
 
 # Import Packages
 import glob
+import logging
+
 import pandas as pd
 import numpy as np
 import pyarrow.parquet as pq
 import pyarrow as pa
 import config
+
+
+logger = logging.getLogger(__name__)
 
 #%% Local Functions
 # Save Crosswalk
@@ -96,7 +101,11 @@ def numeric_matches(df, match_tolerances, verbose = False, drop_differences = Tr
         
         # Display Progress
         if verbose :
-            print('Matching on', column, 'drops',  start_obs-df.shape[0], 'observations')
+            logger.info(
+                "Matching on %s drops %d observations",
+                column,
+                start_obs - df.shape[0],
+            )
 
         # Drop Difference Columns
         if drop_differences :
@@ -318,7 +327,10 @@ def keep_uniques(df, one_to_one = True, verbose = True) :
 
     # Display
     if verbose :
-        print(df[['count_index_s','count_index_p']].value_counts())
+        logger.info(
+            "Match cardinality counts:\n%s",
+            df[['count_index_s', 'count_index_p']].value_counts(),
+        )
 
     # Keep Purchased Loans w/ Unique Match
     df = df.query('count_index_p == 1')
@@ -405,7 +417,7 @@ def match_hmda_sellers_purchasers_round1(data_folder, save_folder, min_year=2007
     for year in range(min_year, max_year+1) :
 
         # Display Progress
-        print('Matching HMDA sellers and purchasers for year:', year)
+        logger.info('Matching HMDA sellers and purchasers for year: %s', year)
 
         # Load Data
         df_a = load_data(data_folder, min_year=year, max_year=year)
@@ -468,7 +480,7 @@ def match_hmda_sellers_purchasers_round1(data_folder, save_folder, min_year=2007
         df_a = df_a.query('property_type_s==property_type_p')
 
         # Display Progress and Append
-        print('Adding', len(df_a), 'matches from year', year)
+        logger.info('Adding %d matches from year %s', len(df_a), year)
         df.append(df_a)
         del df_a
 
@@ -524,7 +536,7 @@ def match_hmda_sellers_purchasers_round2(data_folder, save_folder, min_year = 20
     for year in range(min_year, max_year+1) :
 
         # Display Progress
-        print('Matching HMDA sellers and purchasers for year:', year)
+        logger.info('Matching HMDA sellers and purchasers for year: %s', year)
 
         # Load Data
         df_a = load_data(data_folder, min_year=year, max_year=year)
@@ -625,6 +637,8 @@ def match_hmda_sellers_purchasers_round2(data_folder, save_folder, min_year = 20
 
 #%% Main Routine
 if __name__ == '__main__' :
+
+    logging.basicConfig(level=logging.INFO)
 
     # Set Folder Paths
     DATA_DIR = config.DATA_DIR

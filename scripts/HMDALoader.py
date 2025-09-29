@@ -18,12 +18,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, List, Literal, Optional, Sequence, Tuple, Union
 
+import logging
+
 import pandas as pd
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 import config
+
+
+logger = logging.getLogger(__name__)
 
 
 EngineName = Literal["pandas", "pyarrow", "polars"]
@@ -156,7 +161,7 @@ def load_hmda_file(
         :func:`pyarrow.parquet.read_table`.  The structure should follow the
         [PyArrow filter specification](https://arrow.apache.org/docs/python/parquet.html#filters).
     verbose:
-        If ``True``, the function prints the path of each file before it is
+        If ``True``, the function logs the path of each file before it is
         loaded.
     engine:
         Backend used to materialise the parquet data.  ``"pandas"`` returns a
@@ -199,7 +204,7 @@ def load_hmda_file(
     if engine == "pandas":
         for file_path in files:
             if verbose:
-                print("Adding data from file:", file_path)
+                logger.info("Adding data from file: %s", file_path)
             table = pd.read_parquet(
                 file_path,
                 columns=list(columns) if columns is not None else None,
@@ -212,7 +217,7 @@ def load_hmda_file(
     if engine == "pyarrow":
         for file_path in files:
             if verbose:
-                print("Adding data from file:", file_path)
+                logger.info("Adding data from file: %s", file_path)
             table = pq.read_table(
                 file_path,
                 columns=list(columns) if columns is not None else None,
@@ -225,7 +230,7 @@ def load_hmda_file(
     if engine == "polars":
         for file_path in files:
             if verbose:
-                print("Adding data from file:", file_path)
+                logger.info("Adding data from file: %s", file_path)
             table = pl.scan_parquet(str(file_path), **kwargs)
             tables.append(table)
         return pl.concat(tables)

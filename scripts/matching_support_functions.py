@@ -4,12 +4,17 @@ from __future__ import annotations
 import os
 from typing import Mapping, Optional, Sequence
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 import HMDALoader
+
+
+logger = logging.getLogger(__name__)
 
 FilterCondition = tuple[str, str, object]
 
@@ -601,7 +606,11 @@ def numeric_matches(
 
             # Display Progress
             if verbose :
-                print('Matching on', column, 'drops',  start_obs-df.shape[0], 'observations')
+                logger.info(
+                    "Matching on %s drops %d observations",
+                    column,
+                    start_obs - df.shape[0],
+                )
 
             # Drop Difference Columns
             if drop_differences :
@@ -659,7 +668,11 @@ def weak_numeric_matches(
 
             # Display Progress
             if verbose :
-                print('Matching weakly on', column, 'drops',  start_obs-df.shape[0], 'observations')
+                logger.info(
+                    "Matching weakly on %s drops %d observations",
+                    column,
+                    start_obs - df.shape[0],
+                )
 
             # Drop Difference Columns
             if drop_differences :
@@ -718,7 +731,10 @@ def numeric_matches_post_unique(
 
     # Display Progress
     if verbose :
-        print('Matching on', column, 'drops',  start_obs-df.shape[0], 'observations')
+        logger.info(
+            "Numeric post-unique filtering removed %d observations",
+            start_obs - df.shape[0],
+        )
 
     # Return DataFrame
     return df
@@ -783,7 +799,10 @@ def keep_uniques(df: pd.DataFrame, one_to_one: bool = True, verbose: bool = True
 
     # Display
     if verbose :
-        print(df[['count_index_s','count_index_p']].value_counts())
+        logger.info(
+            "Match cardinality counts:\n%s",
+            df[['count_index_s', 'count_index_p']].value_counts(),
+        )
 
     # Keep Purchased Loans w/ Unique Match
     df = df.query('count_index_p == 1')
@@ -850,7 +869,7 @@ def save_crosswalk(
     cw = pd.concat(cw)
 
     # Save Crosswalk
-    print(cw.match_round.value_counts())
+    logger.info("Crosswalk match counts by round:\n%s", cw.match_round.value_counts())
     cw = pa.Table.from_pandas(cw, preserve_index=False)
     suffix = file_suffix or ""
     pq.write_table(cw, f'{save_folder}/hmda_seller_purchaser_matches_round{match_round}{suffix}.parquet')
