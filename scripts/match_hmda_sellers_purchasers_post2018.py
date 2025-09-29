@@ -7,6 +7,8 @@ Last updated on: Sat Feb 11 10:45:24 2023
 """
 
 # Import Packages
+import logging
+
 import pandas as pd
 import numpy as np
 import pyarrow as pa
@@ -14,6 +16,9 @@ import pyarrow.parquet as pq
 import HMDALoader
 import config
 from matching_support_functions import *
+
+
+logger = logging.getLogger(__name__)
 
 #%% Match Functions
 # Post-2018 Match
@@ -42,7 +47,7 @@ def match_hmda_sellers_purchasers_round1(data_folder, save_folder, min_year=2018
     df = []
     for year in range(min_year, max_year+1) :
 
-        print(year)
+        logger.info("Matching HMDA sellers and purchasers for year: %s", year)
 
         # Load Data
         df_a = load_data(data_folder, min_year=year, max_year=year)
@@ -911,7 +916,7 @@ def create_matched_file(data_folder, match_folder, min_year=2018, max_year=2023,
     # Combine Seller and Purchaser Data
     df_seller = []
     for year in range(min_year, max_year+1) :
-        print('Keeping matched sold loans from year:', year)
+        logger.info('Keeping matched sold loans from year: %s', year)
         file = HMDALoader.get_hmda_files(data_folder, min_year=year, max_year=year, extension='parquet')[0]
         df_a = pq.read_table(file, filters=[('action_taken','in',[1])]).to_pandas(date_as_object = False)
         df_a = df_a.merge(cw, left_on = ['HMDAIndex'], right_on = ['HMDAIndex_s'], how = 'inner')
@@ -923,7 +928,7 @@ def create_matched_file(data_folder, match_folder, min_year=2018, max_year=2023,
     # Combine Seller and Purchaser Data
     df_purchaser = []
     for year in range(min_year, max_year+1) :
-        print('Keeping matched purchased loans from year:', year)
+        logger.info('Keeping matched purchased loans from year: %s', year)
         file = HMDALoader.get_hmda_files(data_folder, min_year=year, max_year=year, extension='parquet')[0]
         df_a = pq.read_table(file, filters=[('action_taken','in',[6])]).to_pandas(date_as_object = False)
         df_a = df_a.merge(cw, left_on=['HMDAIndex'], right_on=['HMDAIndex_p'])
@@ -1164,7 +1169,9 @@ def get_lei_match_counts(data_folder, match_folder, match_round, min_year=2018, 
 
 #%% Main Routine
 if __name__ == '__main__' :
-    
+
+    logging.basicConfig(level=logging.INFO)
+
     # Unzip HMDA Data
     DATA_DIR = config.DATA_DIR
     DATA_FOLDER = DATA_DIR / 'clean'
