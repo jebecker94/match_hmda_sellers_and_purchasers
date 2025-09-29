@@ -17,21 +17,26 @@ import config
 #%% Local Functions
 # Save Crosswalk
 def save_crosswalk(df, save_folder, match_round = 1) :
-    """
-    Create and save a crosswalk from the data.
+    """Persist the crosswalk linking sellers and purchasers for a round.
 
     Parameters
     ----------
-    df : TYPE
-        DESCRIPTION.
-    save_folder : TYPE
-        DESCRIPTION.
-    match_round : TYPE, optional
-        DESCRIPTION. The default is 1.
+    df : pandas.DataFrame
+        Matched seller/purchaser pairs for the current round. The frame must
+        include ``HMDAIndex_s`` and ``HMDAIndex_p`` columns that uniquely
+        identify the originations and purchases, respectively.
+    save_folder : str or pathlib.Path
+        Directory where the round-specific crosswalk parquet should be
+        written. The directory is expected to exist.
+    match_round : int, optional
+        Numeric identifier for the matching round being saved. The value is
+        appended to the output file name. The default is ``1``.
 
     Returns
     -------
-    None.
+    None
+        This function saves a parquet file to ``save_folder`` and does not
+        mutate ``df`` in place.
 
     """
     
@@ -182,18 +187,20 @@ def replace_missing_values(df) :
 
 # Match Sex
 def match_sex(df) :
-    """
-    Match on Applicant and Co-applicant Sex.
+    """Drop seller/purchaser pairs with incompatible sex designations.
 
     Parameters
     ----------
-    df : pandas DataFrame
-        DESCRIPTION.
+    df : pandas.DataFrame
+        Candidate matches that include ``applicant_sex_*`` and
+        ``co_applicant_sex_*`` columns for seller (``_s``) and purchaser
+        (``_p``) records.
 
     Returns
     -------
-    df : pandas DataFrame
-        DESCRIPTION.
+    pandas.DataFrame
+        Subset of ``df`` where the applicant and co-applicant sex indicators
+        are mutually consistent across the two records.
 
     """
 
@@ -337,23 +344,21 @@ def keep_uniques(df, one_to_one = True, verbose = True) :
 
 # Load Data
 def load_data(data_folder, min_year=2007, max_year=2017) :
-    """
-    Combine HMDA data after 2018, keeping originations and purchases only. For
-    use primarily in matching after the first round.
+    """Load pre-2018 HMDA originations and purchases into a single frame.
 
     Parameters
     ----------
     data_folder : str
-        Folder where HMDA data files are located.
+        Directory containing the annual HMDA parquet deliveries.
     min_year : int, optional
-        Minimum year of data to include (inclusive). The default is 2007.
+        Earliest activity year to include (inclusive). The default is ``2007``.
     max_year : int, optional
-        Maximum year of data to include (inclusive). The default is 2017.
+        Latest activity year to include (inclusive). The default is ``2017``.
 
     Returns
     -------
-    df : pandas DataFrame
-        Combined HMDA data.
+    pandas.DataFrame
+        Combined seller and purchaser records for the requested year range.
 
     """
     
@@ -373,6 +378,28 @@ def load_data(data_folder, min_year=2007, max_year=2017) :
 #%% Match Functions
 # Match HMDA Sellers and Purchasers
 def match_hmda_sellers_purchasers_round1(data_folder, save_folder, min_year=2007, max_year=2017) :
+    """Generate first-round pre-2018 seller/purchaser matches within a year.
+
+    The routine matches originations and subsequent purchases using a strict
+    set of demographic, geography, and loan amount comparisons and writes a
+    parquet crosswalk to ``save_folder``.
+
+    Parameters
+    ----------
+    data_folder : str or pathlib.Path
+        Location of the annual HMDA parquet files to be matched.
+    save_folder : str or pathlib.Path
+        Directory where the round-one crosswalk parquet should be written.
+    min_year, max_year : int, optional
+        Inclusive range of years to process. Defaults match the pre-2018 HMDA
+        availability (2007–2017).
+
+    Returns
+    -------
+    None
+        Results are written to ``save_folder``; no value is returned.
+
+    """
 
     df = []
     for year in range(min_year, max_year+1) :
@@ -467,6 +494,28 @@ def match_hmda_sellers_purchasers_round1(data_folder, save_folder, min_year=2007
 
 # Match HMDA Sellers and Purchasers
 def match_hmda_sellers_purchasers_round2(data_folder, save_folder, min_year = 2007, max_year = 2017) :
+    """Perform cross-year refinement of the pre-2018 seller/purchaser pairs.
+
+    Round two begins with the prior crosswalk, excludes already-matched
+    records, and searches for additional matches that meet the relaxed
+    temporal and numeric tolerances outlined in the paper's methodology.
+
+    Parameters
+    ----------
+    data_folder : str or pathlib.Path
+        Location of the annual HMDA parquet files to be matched.
+    save_folder : str or pathlib.Path
+        Directory where the round-two crosswalk parquet should be written.
+    min_year, max_year : int, optional
+        Inclusive range of activity years to process. Defaults correspond to
+        the pre-2018 data availability (2007–2017).
+
+    Returns
+    -------
+    None
+        Results are written to ``save_folder``; no value is returned.
+
+    """
 
     # Load Previous Rounds Crosswalk
     cw = pd.read_parquet(f'{save_folder}/pre2017_hmda_seller_purchaser_matches_round1.parquet')
