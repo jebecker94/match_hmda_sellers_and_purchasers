@@ -10,6 +10,7 @@ Last updated on: Sat Feb 11 10:45:24 2023
 import logging
 
 import pandas as pd
+import polars as pl
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -19,6 +20,843 @@ from matching_support_functions import *
 
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Polars helper utilities
+
+
+def _build_polars_filter_expression(column, operator, value):
+    """Translate a tuple-based filter into a Polars expression.
+
+    This helper mirrors the ``added_filters`` arguments accepted by the
+    pandas-oriented :func:`matching_support_functions.load_data` routine.
+    Only the comparison operators that the matching scripts currently rely on
+    are implemented (``==``, ``!=``, ``in``, ``not in``, ``>=``, ``<=``, ``>``,
+    and ``<``).
+    """
+
+    col_expr = pl.col(column)
+    if operator == "==":
+        return col_expr == value
+    if operator == "!=":
+        return col_expr != value
+    if operator == "in":
+        return col_expr.is_in(value)
+    if operator == "not in":
+        return ~col_expr.is_in(value)
+    if operator == ">=":
+        return col_expr >= value
+    if operator == "<=":
+        return col_expr <= value
+    if operator == ">":
+        return col_expr > value
+    if operator == "<":
+        return col_expr < value
+    raise ValueError(f"Unsupported filter operator '{operator}' for Polars")
+
+
+def _suffix_polars_columns(df: pl.DataFrame, suffix: str, exclude: set[str]) -> pl.DataFrame:
+    """Append a suffix to all columns except those listed in ``exclude``."""
+
+    rename_map = {
+        column: f"{column}{suffix}"
+        for column in df.columns
+        if column not in exclude
+    }
+    return df.rename(rename_map)
+
+
+def load_data_polars(
+    data_folder,
+    min_year: int = 2018,
+    max_year: int = 2023,
+    added_filters=None,
+):
+    """Load HMDA data as a Polars DataFrame.
+
+    This is the Polars analogue to :func:`matching_support_functions.load_data`.
+    The pandas helper is defined in ``scripts/matching_support_functions.py``
+    and serves as a reference for the filtering logic implemented here.
+    """
+
+    hmda_filters = [("action_taken", "in", [1, 6])]
+    if added_filters is not None:
+        hmda_filters += list(added_filters)
+
+    frames: list[pl.LazyFrame] = []
+    for year in range(min_year, max_year + 1):
+        file = HMDALoader.get_hmda_files(
+            data_folder,
+            min_year=year,
+            max_year=year,
+            extension="parquet",
+        )[0]
+        hmda_columns = get_match_columns(file)
+        lazy = pl.scan_parquet(str(file), columns=hmda_columns)
+        expr = None
+        for column, operator, value in hmda_filters:
+            filter_expr = _build_polars_filter_expression(column, operator, value)
+            expr = filter_expr if expr is None else expr & filter_expr
+        if expr is not None:
+            lazy = lazy.filter(expr)
+        lazy = lazy.filter(
+            (~pl.col("purchaser_type").is_in([1, 2, 3, 4])) | (pl.col("action_taken") == 6)
+        )
+        frames.append(lazy)
+
+    if not frames:
+        return pl.DataFrame()
+
+    return pl.concat(frames).collect()
+
+
+def convert_numerics_polars(df: pl.DataFrame) -> pl.DataFrame:
+    """Convert string-coded HMDA numerics to numeric Polars dtypes."""
+
+    exempt_cols = [
+        "combined_loan_to_value_ratio",
+        "interest_rate",
+        "rate_spread",
+        "loan_term",
+        "prepayment_penalty_term",
+        "intro_rate_period",
+        "income",
+        "multifamily_affordable_units",
+        "property_value",
+        "total_loan_costs",
+        "total_points_and_fees",
+        "origination_charges",
+        "discount_points",
+        "lender_credits",
+    ]
+
+    for column in exempt_cols:
+        if column in df.columns:
+            df = df.with_columns(
+                pl.when(pl.col(column) == "Exempt")
+                .then(-99999)
+                .otherwise(pl.col(column))
+                .cast(pl.Float64, strict=False)
+                .alias(column)
+            )
+
+    if "total_units" in df.columns:
+        unit_mapping = {
+            "5-24": 5,
+            "25-49": 6,
+            "50-99": 7,
+            "100-149": 8,
+            ">149": 9,
+        }
+        df = df.with_columns(
+            pl.col("total_units")
+            .replace(unit_mapping)
+            .cast(pl.Float64, strict=False)
+            .alias("total_units")
+        )
+
+    for age_column in ["applicant_age", "co_applicant_age"]:
+        if age_column in df.columns:
+            age_mapping = {
+                "<25": 1,
+                "25-34": 2,
+                "35-44": 3,
+                "45-54": 4,
+                "55-64": 5,
+                "65-74": 6,
+                ">74": 7,
+            }
+            df = df.with_columns(
+                pl.col(age_column)
+                .replace(age_mapping)
+                .cast(pl.Float64, strict=False)
+                .alias(age_column)
+            )
+
+    for column in ["applicant_age_above_62", "co_applicant_age_above_62"]:
+        if column in df.columns:
+            df = df.with_columns(
+                pl.when(pl.col(column).str.to_lowercase() == "no")
+                .then(0)
+                .when(pl.col(column).str.to_lowercase() == "yes")
+                .then(1)
+                .when(pl.col(column).str.to_lowercase() == "na")
+                .then(None)
+                .otherwise(pl.col(column))
+                .cast(pl.Float64, strict=False)
+                .alias(column)
+            )
+
+    if "debt_to_income_ratio" in df.columns:
+        dti_mapping = {
+            "<20%": 10,
+            "20%-<30%": 20,
+            "30%-<36%": 30,
+            "50%-60%": 50,
+            ">60%": 60,
+            "Exempt": -99999,
+        }
+        df = df.with_columns(
+            pl.col("debt_to_income_ratio")
+            .replace(dti_mapping)
+            .cast(pl.Float64, strict=False)
+            .alias("debt_to_income_ratio")
+        )
+
+    if "conforming_loan_limit" in df.columns:
+        conforming_mapping = {"NC": 0, "C": 1, "U": 1111, "NA": -1111}
+        df = df.with_columns(
+            pl.col("conforming_loan_limit")
+            .replace(conforming_mapping)
+            .cast(pl.Float64, strict=False)
+            .alias("conforming_loan_limit")
+        )
+
+    numeric_columns = [
+        "activity_year",
+        "loan_type",
+        "loan_purpose",
+        "occupancy_type",
+        "loan_amount",
+        "action_taken",
+        "msa_md",
+        "county_code",
+        "applicant_race_1",
+        "applicant_race_2",
+        "applicant_race_3",
+        "applicant_race_4",
+        "applicant_race_5",
+        "co_applicant_race_1",
+        "co_applicant_race_2",
+        "co_applicant_race_3",
+        "co_applicant_race_4",
+        "co_applicant_race_5",
+        "applicant_sex",
+        "co_applicant_sex",
+        "income",
+        "purchaser_type",
+        "denial_reason_1",
+        "denial_reason_2",
+        "denial_reason_3",
+        "edit_status",
+        "sequence_number",
+        "rate_spread",
+        "tract_population",
+        "tract_minority_population_percent",
+        "ffiec_msa_md_median_family_income",
+        "tract_to_msa_income_percentage",
+        "tract_owner_occupied_units",
+        "tract_one_to_four_family_homes",
+        "tract_median_age_of_housing_units",
+    ]
+
+    for column in numeric_columns:
+        if column in df.columns:
+            df = df.with_columns(
+                pl.col(column).cast(pl.Float64, strict=False).alias(column)
+            )
+
+    return df
+
+
+def replace_missing_values_polars(df: pl.DataFrame) -> pl.DataFrame:
+    """Replace sentinel missing values with ``None`` using Polars."""
+
+    if {"total_loan_costs", "total_points_and_fees", "origination_charges", "discount_points", "lender_credits"}.issubset(
+        df.columns
+    ):
+        df = df.with_columns(
+            (
+                (pl.col("total_loan_costs") == 1111)
+                & (pl.col("total_points_and_fees") == 1111)
+                & (pl.col("origination_charges") == 1111)
+                & (pl.col("discount_points") == 1111)
+                & (pl.col("lender_credits") == 1111)
+            )
+            .cast(pl.Int8)
+            .alias("i_ExemptFromFeesStrict")
+        )
+        df = df.with_columns(
+            (
+                (pl.col("total_loan_costs") == 1111)
+                | (pl.col("total_points_and_fees") == 1111)
+                | (pl.col("origination_charges") == 1111)
+                | (pl.col("discount_points") == 1111)
+                | (pl.col("lender_credits") == 1111)
+            )
+            .cast(pl.Int8)
+            .alias("i_ExemptFromFeesWeak")
+        )
+
+    replace_columns = [
+        "conforming_loan_limit",
+        "construction_method",
+        "income",
+        "total_units",
+        "lien_status",
+        "multifamily_affordable_units",
+        "total_loan_costs",
+        "total_points_and_fees",
+        "discount_points",
+        "lender_credits",
+        "origination_charges",
+        "interest_rate",
+        "intro_rate_period",
+        "loan_term",
+        "property_value",
+        "total_units",
+        "balloon_payment",
+        "interest_only_payment",
+        "negative_amortization",
+        "open_end_line_of_credit",
+        "other_nonamortizing_features",
+        "prepayment_penalty_term",
+        "reverse_mortgage",
+        "business_or_commercial_purpose",
+        "manufactured_home_land_property_",
+        "manufactured_home_secured_proper",
+    ]
+
+    for column in replace_columns:
+        if column in df.columns:
+            df = df.with_columns(
+                pl.when(
+                    pl.col(column).is_in([-1111, 1111, 99999, -99999])
+                    | (pl.col(column) <= 0)
+                )
+                .then(None)
+                .otherwise(pl.col(column))
+                .alias(column)
+            )
+
+    if {"intro_rate_period", "loan_term"}.issubset(df.columns):
+        df = df.with_columns(
+            pl.when(pl.col("intro_rate_period") == pl.col("loan_term"))
+            .then(pl.lit(None).cast(pl.Float64))
+            .otherwise(pl.col("intro_rate_period"))
+            .alias("intro_rate_period")
+        )
+
+    return df
+
+
+def split_sellers_and_purchasers_polars(
+    df: pl.DataFrame,
+    crosswalk_folder: str,
+    match_round: int = 1,
+    file_suffix: str | None = None,
+):
+    """Split HMDA records into seller and purchaser subsets using Polars.
+
+    The pandas equivalent lives in ``scripts/matching_support_functions.py`` as
+    :func:`split_sellers_and_purchasers`.
+    """
+
+    if match_round > 1:
+        suffix = file_suffix or ""
+        crosswalk_path = (
+            f"{crosswalk_folder}/hmda_seller_purchaser_matches_round{match_round-1}{suffix}.parquet"
+        )
+        cw = pl.read_parquet(crosswalk_path)
+        df = df.join(
+            cw.select(pl.col("HMDAIndex_s").alias("HMDAIndex")),
+            on="HMDAIndex",
+            how="anti",
+        )
+        df = df.join(
+            cw.select(pl.col("HMDAIndex_p").alias("HMDAIndex")),
+            on="HMDAIndex",
+            how="anti",
+        )
+
+    purchasers = df.filter(pl.col("action_taken") == 6)
+    sellers = df.filter(pl.col("action_taken") == 1)
+
+    return sellers, purchasers
+
+
+def numeric_matches_polars(
+    df: pl.DataFrame,
+    match_tolerances,
+    drop_differences: bool = True,
+) -> pl.DataFrame:
+    """Filter candidate pairs using numeric tolerances in Polars."""
+
+    for column, tolerance in match_tolerances.items():
+        seller_col = f"{column}_s"
+        purchaser_col = f"{column}_p"
+        difference_col = f"{column}_difference"
+        if seller_col in df.columns and purchaser_col in df.columns:
+            start_obs = df.height
+            df = df.with_columns(
+                (pl.col(seller_col) - pl.col(purchaser_col)).alias(difference_col)
+            )
+            df = df.filter(
+                pl.col(difference_col).abs() <= tolerance
+                | pl.col(difference_col).is_null()
+            )
+            logger.debug(
+                "Matching on %s drops %d observations",
+                column,
+                start_obs - df.height,
+            )
+            if drop_differences and difference_col in df.columns:
+                df = df.drop(difference_col)
+
+    return df
+
+
+def weak_numeric_matches_polars(
+    df: pl.DataFrame,
+    match_tolerances,
+    drop_differences: bool = True,
+) -> pl.DataFrame:
+    """Allow slight numeric mismatches while keeping best Polars matches."""
+
+    for column, tolerance in match_tolerances.items():
+        seller_col = f"{column}_s"
+        purchaser_col = f"{column}_p"
+        difference_col = f"{column}_difference"
+        min_s_col = f"min_{column}_difference_s"
+        min_p_col = f"min_{column}_difference_p"
+        if seller_col in df.columns and purchaser_col in df.columns:
+            start_obs = df.height
+            df = df.with_columns(
+                (pl.col(seller_col) - pl.col(purchaser_col)).alias(difference_col)
+            )
+            df = df.with_columns(
+                pl.col(difference_col)
+                .abs()
+                .over("HMDAIndex_s")
+                .min()
+                .alias(min_s_col),
+                pl.col(difference_col)
+                .abs()
+                .over("HMDAIndex_p")
+                .min()
+                .alias(min_p_col),
+            )
+            df = df.filter(
+                (pl.col(difference_col).abs() <= tolerance)
+                | (pl.col(min_s_col) > 0)
+                | pl.col(min_s_col).is_null()
+            )
+            df = df.filter(
+                (pl.col(difference_col).abs() <= tolerance)
+                | (pl.col(min_p_col) > 0)
+                | pl.col(min_p_col).is_null()
+            )
+            logger.debug(
+                "Matching weakly on %s drops %d observations",
+                column,
+                start_obs - df.height,
+            )
+            if drop_differences:
+                df = df.drop([difference_col, min_s_col, min_p_col], strict=False)
+
+    return df
+
+
+def perform_fee_matches_polars(df: pl.DataFrame) -> pl.DataFrame:
+    """Compute fee match counters using Polars expressions."""
+
+    fee_columns = [
+        "total_loan_costs",
+        "total_points_and_fees",
+        "origination_charges",
+        "discount_points",
+        "lender_credits",
+    ]
+
+    existing_fee_columns = [
+        column for column in fee_columns if f"{column}_s" in df.columns and f"{column}_p" in df.columns
+    ]
+
+    if not existing_fee_columns:
+        return df
+
+    fee_match_exprs = [
+        ((pl.col(f"{column}_s") == pl.col(f"{column}_p")) & pl.col(f"{column}_s").is_not_null()).cast(pl.Int32)
+        for column in existing_fee_columns
+    ]
+    nonmissing_s_exprs = [pl.col(f"{column}_s").is_not_null().cast(pl.Int32) for column in existing_fee_columns]
+    nonmissing_p_exprs = [pl.col(f"{column}_p").is_not_null().cast(pl.Int32) for column in existing_fee_columns]
+    generous_exprs = [
+        ((pl.col(f"{var1}_s") == pl.col(f"{var2}_p")) & pl.col(f"{var1}_s").is_not_null()).cast(pl.Int32)
+        for var1 in existing_fee_columns
+        for var2 in existing_fee_columns
+    ]
+
+    df = df.with_columns(
+        pl.sum_horizontal(*fee_match_exprs).alias("NumberFeeMatches"),
+        pl.sum_horizontal(*nonmissing_s_exprs).alias("NumberNonmissingFees_s"),
+        pl.sum_horizontal(*nonmissing_p_exprs).alias("NumberNonmissingFees_p"),
+        pl.max_horizontal(*generous_exprs).alias("i_GenerousFeeMatch"),
+    )
+
+    return df
+
+
+def keep_uniques_polars(df: pl.DataFrame, one_to_one: bool = True) -> pl.DataFrame:
+    """Restrict matches to unique seller/purchaser combinations in Polars."""
+
+    df = df.with_columns(
+        pl.len().over("HMDAIndex_s").alias("count_index_s"),
+        pl.len().over("HMDAIndex_p").alias("count_index_p"),
+    )
+
+    logger.debug(
+        "Match cardinality counts:\n%s",
+        df.select(["count_index_s", "count_index_p"]).to_pandas().value_counts(),
+    )
+
+    df = df.filter(pl.col("count_index_p") == 1)
+
+    if one_to_one:
+        df = df.filter(pl.col("count_index_s") == 1)
+    else:
+        df = df.with_columns(
+            (pl.col("purchaser_type_p") > 4).cast(pl.Int8).alias("temp"),
+            pl.col("temp").max().over("HMDAIndex_s").alias("i_LoanHasSecondarySale"),
+        )
+        df = df.filter(
+            (pl.col("count_index_s") == 1)
+            | (
+                (pl.col("count_index_s") == 2)
+                & (pl.col("i_LoanHasSecondarySale") == 1)
+            )
+        )
+        df = df.drop(["temp", "i_LoanHasSecondarySale"], strict=False)
+
+    df = df.drop(["count_index_s", "count_index_p"], strict=False)
+
+    return df
+
+
+def match_sex_polars(df: pl.DataFrame) -> pl.DataFrame:
+    """Remove seller/purchaser pairs that conflict on reported sex codes."""
+
+    for sex_column in ["applicant_sex", "co_applicant_sex"]:
+        seller_col = f"{sex_column}_s"
+        purchaser_col = f"{sex_column}_p"
+        if seller_col in df.columns and purchaser_col in df.columns:
+            df = df.filter(~((pl.col(seller_col) == 1) & pl.col(purchaser_col).is_in([2, 3, 5, 6])))
+            df = df.filter(~((pl.col(seller_col) == 2) & pl.col(purchaser_col).is_in([1, 3, 5, 6])))
+            df = df.filter(~((pl.col(seller_col) == 3) & pl.col(purchaser_col).is_in([1, 2, 5, 6])))
+            df = df.filter(~((pl.col(seller_col) == 5) & pl.col(purchaser_col).is_in([1, 2, 3, 6])))
+            df = df.filter(~((pl.col(seller_col) == 6) & pl.col(purchaser_col).is_in([1, 2, 3, 5])))
+
+    return df
+
+
+def match_age_polars(df: pl.DataFrame) -> pl.DataFrame:
+    """Drop candidate pairs with incompatible applicant ages using Polars."""
+
+    if {"applicant_age_s", "applicant_age_p"}.issubset(df.columns):
+        df = df.filter(
+            (pl.col("applicant_age_s") == pl.col("applicant_age_p"))
+            | pl.col("applicant_age_s").is_in([8888, 9999])
+            | pl.col("applicant_age_p").is_in([8888, 9999])
+        )
+
+    if {"co_applicant_age_s", "co_applicant_age_p"}.issubset(df.columns):
+        df = df.filter(
+            (pl.col("co_applicant_age_s") == pl.col("co_applicant_age_p"))
+            | pl.col("co_applicant_age_s").is_in([8888, 9999])
+            | pl.col("co_applicant_age_p").is_in([8888, 9999])
+        )
+        df = df.filter(
+            (pl.col("co_applicant_age_s") != 9999)
+            | pl.col("co_applicant_age_p").is_in([8888, 9999])
+        )
+        df = df.filter(
+            (pl.col("co_applicant_age_p") != 9999)
+            | pl.col("co_applicant_age_s").is_in([8888, 9999])
+        )
+
+    return df
+
+
+def match_race_polars(df: pl.DataFrame, strict: bool = False) -> pl.DataFrame:
+    """Apply race consistency rules with Polars expressions."""
+
+    race_columns = ["applicant_race", "co_applicant_race"]
+    for race_column in race_columns:
+        for race_number in range(1, 6):
+            seller_col = f"{race_column}_{race_number}_s"
+            purchaser_col = f"{race_column}_{race_number}_p"
+            replacement_map = {21: 2, 22: 2, 23: 2, 24: 2, 25: 2, 26: 2, 27: 2}
+            other_map = {41: 4, 42: 4, 43: 4, 44: 4}
+            if seller_col in df.columns:
+                df = df.with_columns(pl.col(seller_col).replace(replacement_map).alias(seller_col))
+                df = df.with_columns(pl.col(seller_col).replace(other_map).alias(seller_col))
+            if purchaser_col in df.columns:
+                df = df.with_columns(pl.col(purchaser_col).replace(replacement_map).alias(purchaser_col))
+                df = df.with_columns(pl.col(purchaser_col).replace(other_map).alias(purchaser_col))
+
+    for race_number in range(1, 7):
+        df = df.filter(
+            (pl.col("applicant_race_1_s") != race_number)
+            | pl.col("applicant_race_1_p").is_in([race_number, 7, 8])
+            | (pl.col("applicant_race_2_p") == race_number)
+            | (pl.col("applicant_race_3_p") == race_number)
+            | (pl.col("applicant_race_4_p") == race_number)
+            | (pl.col("applicant_race_5_p") == race_number)
+        )
+        df = df.filter(
+            (pl.col("applicant_race_1_p") != race_number)
+            | pl.col("applicant_race_1_s").is_in([race_number, 7, 8])
+            | (pl.col("applicant_race_2_s") == race_number)
+            | (pl.col("applicant_race_3_s") == race_number)
+            | (pl.col("applicant_race_4_s") == race_number)
+            | (pl.col("applicant_race_5_s") == race_number)
+        )
+
+    df = df.filter(
+        (pl.col("co_applicant_race_1_s") != 8)
+        | pl.col("co_applicant_race_1_p").is_in([7, 8])
+    )
+    df = df.filter(
+        (pl.col("co_applicant_race_1_p") != 8)
+        | pl.col("co_applicant_race_1_s").is_in([7, 8])
+    )
+
+    for race_number in range(1, 7):
+        df = df.filter(
+            (pl.col("co_applicant_race_1_s") != race_number)
+            | pl.col("co_applicant_race_1_p").is_in([race_number, 7, 8])
+            | (pl.col("co_applicant_race_2_p") == race_number)
+            | (pl.col("co_applicant_race_3_p") == race_number)
+            | (pl.col("co_applicant_race_4_p") == race_number)
+            | (pl.col("co_applicant_race_5_p") == race_number)
+        )
+        df = df.filter(
+            (pl.col("co_applicant_race_1_p") != race_number)
+            | pl.col("co_applicant_race_1_s").is_in([race_number, 7, 8])
+            | (pl.col("co_applicant_race_2_s") == race_number)
+            | (pl.col("co_applicant_race_3_s") == race_number)
+            | (pl.col("co_applicant_race_4_s") == race_number)
+            | (pl.col("co_applicant_race_5_s") == race_number)
+        )
+
+    if strict:
+        df = df.filter(
+            (pl.col("applicant_race_1_s") == pl.col("applicant_race_1_p"))
+            | pl.col("applicant_race_1_s").is_in([7, 8])
+            | pl.col("applicant_race_1_p").is_in([7, 8])
+        )
+        df = df.filter(
+            (pl.col("co_applicant_race_1_s") == pl.col("co_applicant_race_1_p"))
+            | pl.col("co_applicant_race_1_s").is_in([7, 8])
+            | pl.col("co_applicant_race_1_p").is_in([7, 8])
+        )
+
+    return df
+
+
+def match_ethnicity_polars(df: pl.DataFrame, strict: bool = False) -> pl.DataFrame:
+    """Apply ethnicity matching rules using Polars expressions."""
+
+    ethnicity_columns = ["applicant_ethnicity", "co_applicant_ethnicity"]
+    for ethnicity_column in ethnicity_columns:
+        for ethnicity_number in range(1, 6):
+            seller_col = f"{ethnicity_column}_{ethnicity_number}_s"
+            purchaser_col = f"{ethnicity_column}_{ethnicity_number}_p"
+            replacement_map = {11: 1, 12: 1, 13: 1, 14: 1}
+            if seller_col in df.columns:
+                df = df.with_columns(pl.col(seller_col).replace(replacement_map).alias(seller_col))
+            if purchaser_col in df.columns:
+                df = df.with_columns(pl.col(purchaser_col).replace(replacement_map).alias(purchaser_col))
+
+    for ethnicity_number in range(1, 4):
+        df = df.filter(
+            (pl.col("applicant_ethnicity_1_s") != ethnicity_number)
+            | pl.col("applicant_ethnicity_1_p").is_in([ethnicity_number, 4, 5])
+            | (pl.col("applicant_ethnicity_2_p") == ethnicity_number)
+            | (pl.col("applicant_ethnicity_3_p") == ethnicity_number)
+            | (pl.col("applicant_ethnicity_4_p") == ethnicity_number)
+            | (pl.col("applicant_ethnicity_5_p") == ethnicity_number)
+        )
+        df = df.filter(
+            (pl.col("applicant_ethnicity_1_p") != ethnicity_number)
+            | pl.col("applicant_ethnicity_1_s").is_in([ethnicity_number, 4, 5])
+            | (pl.col("applicant_ethnicity_2_s") == ethnicity_number)
+            | (pl.col("applicant_ethnicity_3_s") == ethnicity_number)
+            | (pl.col("applicant_ethnicity_4_s") == ethnicity_number)
+            | (pl.col("applicant_ethnicity_5_s") == ethnicity_number)
+        )
+
+    df = df.filter(
+        (pl.col("co_applicant_ethnicity_1_s") != 5)
+        | pl.col("co_applicant_ethnicity_1_p").is_in([4, 5])
+    )
+    df = df.filter(
+        (pl.col("co_applicant_ethnicity_1_p") != 5)
+        | pl.col("co_applicant_ethnicity_1_s").is_in([4, 5])
+    )
+
+    for ethnicity_number in range(1, 4):
+        df = df.filter(
+            (pl.col("co_applicant_ethnicity_1_s") != ethnicity_number)
+            | pl.col("co_applicant_ethnicity_1_p").is_in([ethnicity_number, 4, 5])
+            | (pl.col("co_applicant_ethnicity_2_p") == ethnicity_number)
+            | (pl.col("co_applicant_ethnicity_3_p") == ethnicity_number)
+            | (pl.col("co_applicant_ethnicity_4_p") == ethnicity_number)
+            | (pl.col("co_applicant_ethnicity_5_p") == ethnicity_number)
+        )
+        df = df.filter(
+            (pl.col("co_applicant_ethnicity_1_p") != ethnicity_number)
+            | pl.col("co_applicant_ethnicity_1_s").is_in([ethnicity_number, 4, 5])
+            | (pl.col("co_applicant_ethnicity_2_s") == ethnicity_number)
+            | (pl.col("co_applicant_ethnicity_3_s") == ethnicity_number)
+            | (pl.col("co_applicant_ethnicity_4_s") == ethnicity_number)
+            | (pl.col("co_applicant_ethnicity_5_s") == ethnicity_number)
+        )
+
+    if strict:
+        df = df.filter(
+            (pl.col("applicant_ethnicity_1_s") == pl.col("applicant_ethnicity_1_p"))
+            | pl.col("applicant_ethnicity_1_s").is_in([4])
+            | pl.col("applicant_ethnicity_1_p").is_in([4])
+        )
+        df = df.filter(
+            (pl.col("co_applicant_ethnicity_1_s") == pl.col("co_applicant_ethnicity_1_p"))
+            | pl.col("co_applicant_ethnicity_1_s").is_in([4])
+            | pl.col("co_applicant_ethnicity_1_p").is_in([4])
+        )
+
+    return df
+
+
+def save_crosswalk_polars(
+    df: pl.DataFrame,
+    save_folder: str,
+    match_round: int = 1,
+    file_suffix: str | None = None,
+) -> None:
+    """Persist Polars match results to a parquet crosswalk."""
+
+    suffix = file_suffix or ""
+    crosswalk_frames: list[pl.DataFrame] = []
+
+    if match_round > 1:
+        previous_path = f"{save_folder}/hmda_seller_purchaser_matches_round{match_round-1}{suffix}.parquet"
+        crosswalk_frames.append(pl.read_parquet(previous_path))
+
+    current = df.select(["HMDAIndex_s", "HMDAIndex_p"]).with_columns(
+        pl.lit(match_round).alias("match_round")
+    )
+    crosswalk_frames.append(current)
+
+    combined = pl.concat(crosswalk_frames)
+    logger.info(
+        "Crosswalk match counts by round:\n%s",
+        combined.groupby("match_round").count().to_pandas(),
+    )
+
+    output_path = f"{save_folder}/hmda_seller_purchaser_matches_round{match_round}{suffix}.parquet"
+    pq.write_table(combined.to_arrow(), output_path)
+
+
+def match_hmda_sellers_purchasers_round1_polars(
+    data_folder,
+    save_folder,
+    min_year: int = 2018,
+    max_year: int = 2023,
+    file_suffix: str | None = None,
+):
+    """Polars implementation of the first seller/purchaser match round."""
+
+    frames: list[pl.DataFrame] = []
+    match_columns = [
+        "loan_type",
+        "loan_amount",
+        "census_tract",
+        "occupancy_type",
+        "loan_purpose",
+    ]
+
+    for year in range(min_year, max_year + 1):
+        logger.info("Matching HMDA sellers and purchasers for year: %s (Polars)", year)
+        df_year = load_data_polars(data_folder, min_year=year, max_year=year)
+        df_year = convert_numerics_polars(df_year)
+        df_year = replace_missing_values_polars(df_year)
+        df_year = df_year.drop_nulls(subset=[col for col in match_columns if col in df_year.columns])
+        if "census_tract" in df_year.columns:
+            df_year = df_year.filter(~pl.col("census_tract").is_in(["", "NA"]))
+
+        sellers, purchasers = split_sellers_and_purchasers_polars(df_year, save_folder)
+        sellers = _suffix_polars_columns(sellers, "_s", set(match_columns))
+        purchasers = _suffix_polars_columns(purchasers, "_p", set(match_columns))
+        df_year = sellers.join(purchasers, on=match_columns, how="inner")
+
+        match_tolerances = {"income": 1, "interest_rate": 0.0625}
+        df_year = numeric_matches_polars(df_year, match_tolerances)
+
+        weak_tolerances = {"interest_rate": 0.01}
+        df_year = weak_numeric_matches_polars(df_year, weak_tolerances)
+
+        df_year = perform_fee_matches_polars(df_year)
+        df_year = df_year.filter(
+            (pl.col("NumberFeeMatches") >= 1)
+            | (pl.col("NumberNonmissingFees_s") == 0)
+            | (pl.col("NumberNonmissingFees_p") == 0)
+        )
+
+        df_year = keep_uniques_polars(df_year)
+
+        df_year = match_age_polars(df_year)
+        df_year = match_sex_polars(df_year)
+        df_year = match_race_polars(df_year)
+        df_year = match_ethnicity_polars(df_year)
+
+        match_tolerances = {
+            "conforming_loan_limit": 0,
+            "construction_method": 0,
+            "discount_points": 5,
+            "income": 1,
+            "interest_rate": 0.0625,
+            "intro_rate_period": 6,
+            "lender_credits": 5,
+            "lien_status": 0,
+            "loan_term": 12,
+            "open_end_line_of_credit": 0,
+            "origination_charges": 5,
+            "property_value": 20000,
+            "total_units": 0,
+            "applicant_age_above_62": 0,
+            "co_applicant_age_above_62": 0,
+        }
+        df_year = numeric_matches_polars(df_year, match_tolerances)
+
+        required_drop_columns = {
+            "interest_rate_s",
+            "interest_rate_p",
+            "income_s",
+            "property_value_s",
+            "HMDAIndex_s",
+        }
+        if required_drop_columns.issubset(df_year.columns):
+            drop_condition = (
+                ((pl.col("interest_rate_s") - pl.col("interest_rate_p")).abs() >= 0.005)
+                | pl.col("income_s").is_null()
+                | pl.col("interest_rate_s").is_null()
+                | pl.col("property_value_s").is_null()
+            )
+            df_year = df_year.with_columns(drop_condition.alias("i_DropObservation"))
+            df_year = df_year.with_columns(
+                pl.col("i_DropObservation").max().over("HMDAIndex_s").alias("i_DropSale")
+            )
+            df_year = df_year.filter(pl.col("i_DropSale") != 1)
+            df_year = df_year.drop(["i_DropObservation", "i_DropSale"], strict=False)
+
+        frames.append(df_year)
+
+    if not frames:
+        return
+
+    matches = pl.concat(frames)
+    save_crosswalk_polars(matches, save_folder, match_round=1, file_suffix=file_suffix)
 
 #%% Match Functions
 # Post-2018 Match
