@@ -8,6 +8,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -118,6 +119,56 @@ def load_data(
     # Return DataFrame
     return df
 
+
+def load_data_polars(
+    data_folder: str,
+    min_year: int = 2018,
+    max_year: int = 2023,
+    added_filters: Optional[Sequence[FilterCondition]] = None,
+) -> pl.DataFrame :
+    """Combine HMDA data files and keep only originations and purchases.
+
+    This function mirrors :func:`load_data` but returns a :class:`polars.DataFrame`.
+
+    Parameters
+    ----------
+    data_folder : str
+        Folder where HMDA data files are located.
+    min_year : int, optional
+        Minimum year of data to include (inclusive). The default is 2018.
+    max_year : int, optional
+        Maximum year of data to include (inclusive). The default is 2023.
+    added_filters : Sequence[tuple[str, str, object]], optional
+        Additional pyarrow filter tuples to apply when reading the parquet
+        files. Each filter follows the (column, operator, value) convention
+        expected by :func:`pyarrow.parquet.read_table`.
+
+    Returns
+    -------
+    polars.DataFrame
+        Combined HMDA data covering the requested years.
+    """
+
+    hmda_filters: list[FilterCondition] = [('action_taken','in',[1,6])]
+    if added_filters is not None :
+        hmda_filters += list(added_filters)
+
+    df_list: list[pl.DataFrame] = []
+    for year in range(min_year, max_year+1) :
+        file = HMDALoader.get_hmda_files(data_folder, min_year=year, max_year=year, extension='parquet')[0]
+        hmda_columns = get_match_columns(file)
+        table = pq.read_table(file, columns=hmda_columns, filters=hmda_filters)
+        df_a = pl.from_arrow(table)
+        df_a = df_a.filter(
+            (~pl.col('purchaser_type').is_in([1, 2, 3, 4])) | (pl.col('action_taken') == 6)
+        )
+        df_list.append(df_a)
+
+    if not df_list :
+        return pl.DataFrame()
+
+    return pl.concat(df_list, how='vertical_relaxed')
+
 # Replace Missing Values
 def replace_missing_values(df: pd.DataFrame) -> pd.DataFrame :
     """Replace numeric sentinel codes with ``None`` for easier comparisons.
@@ -175,6 +226,109 @@ def replace_missing_values(df: pd.DataFrame) -> pd.DataFrame :
     df.loc[df['intro_rate_period'] == df['loan_term'], 'intro_rate_period'] = None
 
     # Return DataFrame
+    return df
+
+
+def replace_missing_values_polars(df: pl.DataFrame) -> pl.DataFrame :
+    """Replace numeric sentinel codes with ``None`` for easier comparisons.
+
+    This function mirrors :func:`replace_missing_values` but operates on a
+    :class:`polars.DataFrame`.
+
+    Parameters
+    ----------
+    df : polars.DataFrame
+        Data with numerics for missing values.
+
+    Returns
+    -------
+    polars.DataFrame
+        Data with NoneTypes for missing values.
+    """
+
+    fee_columns = [
+        'total_loan_costs',
+        'total_points_and_fees',
+        'origination_charges',
+        'discount_points',
+        'lender_credits',
+    ]
+
+    if all(col in df.columns for col in fee_columns) :
+        df = df.with_columns([
+            (
+                (pl.col('total_loan_costs') == 1111)
+                & (pl.col('total_points_and_fees') == 1111)
+                & (pl.col('origination_charges') == 1111)
+                & (pl.col('discount_points') == 1111)
+                & (pl.col('lender_credits') == 1111)
+            ).alias('i_ExemptFromFeesStrict'),
+            (
+                (pl.col('total_loan_costs') == 1111)
+                | (pl.col('total_points_and_fees') == 1111)
+                | (pl.col('origination_charges') == 1111)
+                | (pl.col('discount_points') == 1111)
+                | (pl.col('lender_credits') == 1111)
+            ).alias('i_ExemptFromFeesWeak'),
+        ])
+
+    replace_columns = ['conforming_loan_limit',
+                       'construction_method',
+                       'income',
+                       'total_units',
+                       'lien_status',
+                       'multifamily_affordable_units',
+                       'total_loan_costs',
+                       'total_points_and_fees',
+                       'discount_points',
+                       'lender_credits',
+                       'origination_charges',
+                       'interest_rate',
+                       'intro_rate_period',
+                       'loan_term',
+                       'property_value',
+                       'balloon_payment',
+                       'interest_only_payment',
+                       'negative_amortization',
+                       'open_end_line_of_credit',
+                       'other_nonamortizing_features',
+                       'prepayment_penalty_term',
+                       'reverse_mortgage',
+                       'business_or_commercial_purpose',
+                       'manufactured_home_land_property_',
+                       'manufactured_home_secured_proper',
+                       ]
+
+    sentinel_values = [-1111, 1111, 99999, -99999]
+    replace_exprs: list[pl.Expr] = []
+    for col in replace_columns :
+        if col in df.columns :
+            replace_exprs.append(
+                pl.when(
+                    pl.col(col).is_in(sentinel_values)
+                    | (
+                        pl.col(col)
+                        .cast(pl.Float64, strict=False)
+                        .is_not_null()
+                        & (pl.col(col).cast(pl.Float64, strict=False) <= 0)
+                    )
+                )
+                .then(None)
+                .otherwise(pl.col(col))
+                .alias(col)
+            )
+
+    if replace_exprs :
+        df = df.with_columns(replace_exprs)
+
+    if {'intro_rate_period', 'loan_term'}.issubset(set(df.columns)) :
+        df = df.with_columns(
+            pl.when(pl.col('intro_rate_period') == pl.col('loan_term'))
+            .then(None)
+            .otherwise(pl.col('intro_rate_period'))
+            .alias('intro_rate_period')
+        )
+
     return df
 
 # Convert Numerics
@@ -306,6 +460,167 @@ def convert_numerics(df: pd.DataFrame) -> pd.DataFrame :
     # Return DataFrame
     return df
 
+
+def convert_numerics_polars(df: pl.DataFrame) -> pl.DataFrame :
+    """Cast HMDA string codes to numeric dtypes where applicable.
+
+    This function mirrors :func:`convert_numerics` but operates on a
+    :class:`polars.DataFrame`.
+
+    Parameters
+    ----------
+    df : polars.DataFrame
+        Raw HMDA data where many numeric fields are represented as strings.
+
+    Returns
+    -------
+    polars.DataFrame
+        Data frame with numeric columns converted to ``float``/``int`` types
+        when possible.
+    """
+
+    exempt_cols = ['combined_loan_to_value_ratio',
+                   'interest_rate',
+                   'rate_spread',
+                   'loan_term',
+                   'prepayment_penalty_term',
+                   'intro_rate_period',
+                   'income',
+                   'multifamily_affordable_units',
+                   'property_value',
+                   'total_loan_costs',
+                   'total_points_and_fees',
+                   'origination_charges',
+                   'discount_points',
+                   'lender_credits',
+                   ]
+
+    for col in exempt_cols :
+        if col in df.columns :
+            df = df.with_columns(
+                pl.when(pl.col(col) == "Exempt")
+                .then(pl.lit(-99999))
+                .otherwise(pl.col(col))
+                .alias(col)
+            )
+            df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False).alias(col))
+
+    if 'total_units' in df.columns :
+        mapping = {
+            "5-24": 5,
+            "25-49": 6,
+            "50-99": 7,
+            "100-149": 8,
+            ">149": 9,
+        }
+        df = df.with_columns(
+            pl.col('total_units')
+            .replace(mapping, return_dtype=pl.Float64)
+            .cast(pl.Float64, strict=False)
+            .alias('total_units')
+        )
+
+    for col in ['applicant_age', 'co_applicant_age'] :
+        if col in df.columns :
+            mapping = {
+                "<25": 1,
+                "25-34": 2,
+                "35-44": 3,
+                "45-54": 4,
+                "55-64": 5,
+                "65-74": 6,
+                ">74": 7,
+            }
+            df = df.with_columns(
+                pl.col(col)
+                .replace(mapping, return_dtype=pl.Float64)
+                .cast(pl.Float64, strict=False)
+                .alias(col)
+            )
+
+    for col in ['applicant_age_above_62', 'co_applicant_age_above_62'] :
+        if col in df.columns :
+            mapping = {"No": 0, "no": 0, "NO": 0, "Yes": 1, "yes": 1, "YES": 1}
+            df = df.with_columns(
+                pl.col(col)
+                .replace(mapping, default=None, return_dtype=pl.Float64)
+                .alias(col)
+            )
+
+    if 'debt_to_income_ratio' in df.columns :
+        mapping = {
+            "<20%": 10,
+            "20%-<30%": 20,
+            "30%-<36%": 30,
+            "50%-60%": 50,
+            ">60%": 60,
+            "Exempt": -99999,
+        }
+        df = df.with_columns(
+            pl.col('debt_to_income_ratio')
+            .replace(mapping, default=None, return_dtype=pl.Float64)
+            .cast(pl.Float64, strict=False)
+            .alias('debt_to_income_ratio')
+        )
+
+    col = 'conforming_loan_limit'
+    if col in df.columns :
+        mapping = {"NC": 0, "C": 1, "U": 1111, "NA": -1111}
+        df = df.with_columns(
+            pl.col(col)
+            .replace(mapping, default=None, return_dtype=pl.Float64)
+            .cast(pl.Float64, strict=False)
+            .alias(col)
+        )
+
+    numeric_columns = [
+        'activity_year',
+        'loan_type',
+        'loan_purpose',
+        'occupancy_type',
+        'loan_amount',
+        'action_taken',
+        'msa_md',
+        'county_code',
+        'applicant_race_1',
+        'applicant_race_2',
+        'applicant_race_3',
+        'applicant_race_4',
+        'applicant_race_5',
+        'co_applicant_race_1',
+        'co_applicant_race_2',
+        'co_applicant_race_3',
+        'co_applicant_race_4',
+        'co_applicant_race_5',
+        'applicant_sex',
+        'co_applicant_sex',
+        'income',
+        'purchaser_type',
+        'denial_reason_1',
+        'denial_reason_2',
+        'denial_reason_3',
+        'edit_status',
+        'sequence_number',
+        'rate_spread',
+        'tract_population',
+        'tract_minority_population_percent',
+        'ffiec_msa_md_median_family_income',
+        'tract_to_msa_income_percentage',
+        'tract_owner_occupied_units',
+        'tract_one_to_four_family_homes',
+        'tract_median_age_of_housing_units',
+    ]
+
+    numeric_exprs = [
+        pl.col(col).cast(pl.Float64, strict=False).alias(col)
+        for col in numeric_columns
+        if col in df.columns
+    ]
+    if numeric_exprs :
+        df = df.with_columns(numeric_exprs)
+
+    return df
+
 # Keep Only Observations with Potential Matches on Match Columns
 def keep_potential_matches(df: pd.DataFrame, match_columns: Sequence[str]) -> pd.DataFrame :
     """Filter to loans that have at least one potential counterpart.
@@ -335,6 +650,19 @@ def keep_potential_matches(df: pd.DataFrame, match_columns: Sequence[str]) -> pd
 
     # Return DataFrame
     return df
+
+
+def keep_potential_matches_polars(df: pl.DataFrame, match_columns: Sequence[str]) -> pl.DataFrame :
+    """Filter to loans that have at least one potential counterpart."""
+
+    df = df.with_columns([
+        pl.col('action_taken').eq(6).any().over(match_columns).alias('i_HasPurchase'),
+        pl.col('action_taken').eq(1).any().over(match_columns).alias('i_HasSale'),
+    ])
+
+    df = df.filter(pl.col('i_HasSale') & pl.col('i_HasPurchase'))
+
+    return df.drop(['i_HasSale', 'i_HasPurchase'])
 
 # Split Sellers and Purchasers
 def split_sellers_and_purchasers(
@@ -762,6 +1090,44 @@ def perform_fee_matches(df: pd.DataFrame) -> pd.DataFrame :
     # Return DataFrame
     return df
 
+
+def perform_fee_matches_polars(df: pl.DataFrame) -> pl.DataFrame :
+    """Count non-missing fee variables and flag matching fee structures."""
+
+    fee_columns = ['total_loan_costs', 'total_points_and_fees', 'origination_charges', 'discount_points', 'lender_credits']
+    seller_cols = {f'{col}_s' for col in fee_columns}
+    purchaser_cols = {f'{col}_p' for col in fee_columns}
+    if not seller_cols.issubset(df.columns) or not purchaser_cols.issubset(df.columns) :
+        return df
+
+    match_exprs = [
+        (
+            (pl.col(f'{fee}_s') == pl.col(f'{fee}_p'))
+            & pl.col(f'{fee}_s').is_not_null()
+        ).cast(pl.Int64)
+        for fee in fee_columns
+    ]
+    nonmissing_s_exprs = [pl.col(f'{fee}_s').is_not_null().cast(pl.Int64) for fee in fee_columns]
+    nonmissing_p_exprs = [pl.col(f'{fee}_p').is_not_null().cast(pl.Int64) for fee in fee_columns]
+
+    generous_exprs = [
+        (
+            (pl.col(f'{var1}_s') == pl.col(f'{var2}_p'))
+            & pl.col(f'{var1}_s').is_not_null()
+        )
+        for var1 in fee_columns
+        for var2 in fee_columns
+    ]
+
+    df = df.with_columns([
+        pl.sum_horizontal(match_exprs).alias('NumberFeeMatches'),
+        pl.sum_horizontal(nonmissing_s_exprs).alias('NumberNonmissingFees_s'),
+        pl.sum_horizontal(nonmissing_p_exprs).alias('NumberNonmissingFees_p'),
+        pl.any_horizontal(generous_exprs).cast(pl.Int64).alias('i_GenerousFeeMatch'),
+    ])
+
+    return df
+
 # Keep Uniques
 def keep_uniques(df: pd.DataFrame, one_to_one: bool = True) -> pd.DataFrame :
     """Restrict matches so each purchaser links to a single sale.
@@ -811,6 +1177,46 @@ def keep_uniques(df: pd.DataFrame, one_to_one: bool = True) -> pd.DataFrame :
     # Return DataFrame
     return df
 
+
+def keep_uniques_polars(df: pl.DataFrame, one_to_one: bool = True) -> pl.DataFrame :
+    """Restrict matches so each purchaser links to a single sale."""
+
+    df = df.with_columns([
+        pl.len().over('HMDAIndex_s').alias('count_index_s'),
+        pl.len().over('HMDAIndex_p').alias('count_index_p'),
+    ])
+
+    logger.debug(
+        "Match cardinality counts:\n%s",
+        df.select(['count_index_s', 'count_index_p']).to_pandas().value_counts(),
+    )
+
+    df = df.filter(pl.col('count_index_p') == 1)
+
+    if one_to_one :
+        df = df.filter(pl.col('count_index_s') == 1)
+    else :
+        if 'purchaser_type_p' in df.columns :
+            df = df.with_columns(
+                (pl.col('purchaser_type_p') > 4).cast(pl.Int8).alias('temp')
+            )
+            df = df.with_columns(
+                pl.col('temp').max().over('HMDAIndex_s').alias('i_LoanHasSecondarySale')
+            )
+            df = df.filter(
+                (pl.col('count_index_s') == 1)
+                | (
+                    (pl.col('count_index_s') == 2)
+                    & (pl.col('i_LoanHasSecondarySale') == 1)
+                )
+            )
+            df = df.drop('i_LoanHasSecondarySale')
+            df = df.drop('temp')
+
+    df = df.drop(['count_index_s', 'count_index_p'])
+
+    return df
+
 # Save Crosswalk
 def save_crosswalk(
     df: pd.DataFrame,
@@ -858,3 +1264,34 @@ def save_crosswalk(
     cw = pa.Table.from_pandas(cw, preserve_index=False)
     suffix = file_suffix or ""
     pq.write_table(cw, f'{save_folder}/hmda_seller_purchaser_matches_round{match_round}{suffix}.parquet')
+
+
+def save_crosswalk_polars(
+    df: pl.DataFrame,
+    save_folder: str,
+    match_round: int = 1,
+    file_suffix: Optional[str] = None,
+) -> None :
+    """Persist the current set of matches to a parquet crosswalk file."""
+
+    cw_tables: list[pl.DataFrame] = []
+    if match_round > 1 :
+        suffix = file_suffix or ""
+        previous = pl.read_parquet(
+            f'{save_folder}/hmda_seller_purchaser_matches_round{match_round-1}{suffix}.parquet'
+        )
+        cw_tables.append(previous)
+
+    cw_a = df.select(['HMDAIndex_s', 'HMDAIndex_p'])
+    cw_a = cw_a.with_columns(pl.lit(match_round).alias('match_round'))
+    cw_tables.append(cw_a)
+
+    cw = pl.concat(cw_tables, how='vertical_relaxed') if len(cw_tables) > 1 else cw_tables[0]
+
+    logger.info(
+        "Crosswalk match counts by round:\n%s",
+        cw.group_by('match_round').count().to_pandas().set_index('match_round')['count'],
+    )
+
+    suffix = file_suffix or ""
+    pq.write_table(cw.to_arrow(), f'{save_folder}/hmda_seller_purchaser_matches_round{match_round}{suffix}.parquet')
