@@ -8,6 +8,7 @@ This repository bundles the scripts that the Becker research group uses to pair 
 - `scripts/matching_support_functions.py` – shared data preparation helpers that harmonize schema differences, clean key variables, split originations from purchases, and apply demographic/numeric matching rules used throughout the pipeline.【F:scripts/matching_support_functions.py†L8-L515】
 - `scripts/match_hmda_sellers_purchasers_pre2018.py` – end-to-end matching routine tailored to the narrower pre-2018 HMDA schema, producing staged crosswalks between sellers and purchasers.【F:scripts/match_hmda_sellers_purchasers_pre2018.py†L18-L575】
 - `scripts/match_hmda_sellers_purchasers_post2018.py` – multi-round workflow for the post-2018 expanded HMDA dataset that incrementally refines candidate matches and exports parquet crosswalks and diagnostics.【F:scripts/match_hmda_sellers_purchasers_post2018.py†L20-L1188】
+- `scripts/top_counterparty_summary.py` – post-processing helpers that rank the most frequent seller/purchaser pairings from the final matched loan table, optionally returning institution names alongside IDs.【F:scripts/top_counterparty_summary.py†L1-L141】
 
 ## Data requirements
 
@@ -48,6 +49,24 @@ Additional libraries may be required if you extend the scripts to produce visual
    Uncomment the desired function calls in the `__main__` section to control which rounds produce outputs.【F:scripts/match_hmda_sellers_purchasers_post2018.py†L1168-L1188】
 
 4. Inspect the generated parquet or CSV crosswalks in the `match_data` directory to verify match quality. Later rounds apply progressively stricter numeric tolerances, demographic checks, and uniqueness constraints to winnow the candidate list before saving the final crosswalks.【F:scripts/match_hmda_sellers_purchasers_post2018.py†L41-L127】【F:scripts/matching_support_functions.py†L367-L515】
+
+## Summarizing top counterparties
+
+Use `scripts/top_counterparty_summary.py` to compute the most frequent counterparties once you have created the combined matched-loan parquet from `create_matched_file`.
+
+```python
+import pandas as pd
+from top_counterparty_summary import (
+    CounterpartySummaryConfig,
+    summarize_top_counterparties,
+)
+
+matches = pd.read_parquet("match_data/hmda_seller_purchaser_matched_loans_round1.parquet")
+config = CounterpartySummaryConfig(top_n=10, include_names=True)
+top_sellers, top_purchasers = summarize_top_counterparties(matches, config=config)
+```
+
+The helper returns two data frames: the first lists each seller alongside its top purchaser relationships, while the second inverts the view to highlight each purchaser's key seller counterparties.【F:scripts/top_counterparty_summary.py†L43-L141】 Adjust `top_n` to control how many partners are retained for each institution and set `include_names=True` to merge institution names (defaults assume the matched table uses the `_s`/`_p` suffixes from `create_matched_file`).【F:scripts/top_counterparty_summary.py†L7-L37】【F:scripts/match_hmda_sellers_purchasers_post2018.py†L1708-L1739】
 
 ## Extending the pipeline
 
