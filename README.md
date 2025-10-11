@@ -9,6 +9,7 @@ This repository bundles the scripts that the Becker research group uses to pair 
 - `scripts/match_hmda_sellers_purchasers_pre2018.py` – end-to-end matching routine tailored to the narrower pre-2018 HMDA schema, producing staged crosswalks between sellers and purchasers.【F:scripts/match_hmda_sellers_purchasers_pre2018.py†L18-L575】
 - `scripts/match_hmda_sellers_purchasers_post2018.py` – multi-round workflow for the post-2018 expanded HMDA dataset that incrementally refines candidate matches and exports parquet crosswalks and diagnostics.【F:scripts/match_hmda_sellers_purchasers_post2018.py†L20-L1188】
 - `scripts/top_counterparty_summary.py` – post-processing helpers that rank the most frequent seller/purchaser pairings from the final matched loan table, optionally returning institution names alongside IDs.【F:scripts/top_counterparty_summary.py†L1-L141】
+- `scripts/match_statistics.py` – Polars-based utilities for calculating overall and grouped match rates once you have originations, purchases, and match linkage tables available.【F:scripts/match_statistics.py†L1-L141】
 
 ## Data requirements
 
@@ -67,6 +68,10 @@ top_sellers, top_purchasers = summarize_top_counterparties(matches, config=confi
 ```
 
 The helper returns two data frames: the first lists each seller alongside its top purchaser relationships, while the second inverts the view to highlight each purchaser's key seller counterparties.【F:scripts/top_counterparty_summary.py†L43-L141】 Adjust `top_n` to control how many partners are retained for each institution and set `include_names=True` to merge institution names (defaults assume the matched table uses the `_s`/`_p` suffixes from `create_matched_file`).【F:scripts/top_counterparty_summary.py†L7-L37】【F:scripts/match_hmda_sellers_purchasers_post2018.py†L1708-L1739】
+
+## Computing match statistics
+
+`scripts/match_statistics.py` provides a lightweight summary layer for analysts who prefer to explore match rates in Polars after producing a seller–purchaser crosswalk. Load your originations, purchases, and linkage tables (each as a Polars `DataFrame`) and call `global_match_rates` to obtain overall metrics as well as grouped breakouts by year, lender LEI, loan type, and—when available—purchaser type.【F:scripts/match_statistics.py†L33-L141】 The helper automatically deduplicates multiple purchaser links per origination (keeping the highest `match_score` when present) and returns a dictionary of `DataFrame` objects you can export or chart as needed.【F:scripts/match_statistics.py†L61-L134】
 
 ## Extending the pipeline
 

@@ -1,5 +1,9 @@
-# pip install polars pyarrow
+"""Utilities for summarising HMDA match outcomes with Polars."""
+
+from __future__ import annotations
+
 import polars as pl
+
 
 # ----------------------------
 # Expected minimal schemas
@@ -18,14 +22,20 @@ import polars as pl
 #     (a) dedupe to the top-scoring purchase *per origination* (default), or
 #     (b) keep all (set keep_top_purchase=False).
 
+
 def _safe_select(df: pl.DataFrame, cols: list[str]) -> list[str]:
-    return [c for c in cols if c in df.columns]
+    """Return the subset of ``cols`` that are present in ``df``."""
+
+    return [column for column in cols if column in df.columns]
+
 
 def prepare_unique_matches(
     matches_df: pl.DataFrame,
     keep_top_purchase: bool = True,
     score_col: str | None = "match_score",
 ) -> pl.DataFrame:
+    """Return a match table with unique originations (optionally highest score)."""
+
     if keep_top_purchase and (score_col is not None and score_col in matches_df.columns):
         # Keep highest-scoring purchase per origination
         return (
@@ -36,7 +46,8 @@ def prepare_unique_matches(
             .drop("_ridx")
         )
     # Otherwise, enforce uniqueness of (origination_id, purchase_id)
-    return matches_df.unique(subset=["origination_id","purchase_id"])
+    return matches_df.unique(subset=["origination_id", "purchase_id"])
+
 
 def global_match_rates(
     originations_df: pl.DataFrame,
@@ -44,6 +55,8 @@ def global_match_rates(
     matches_df: pl.DataFrame,
     keep_top_purchase: bool = True,
 ) -> dict[str, pl.DataFrame]:
+    """Compute aggregate match statistics from pre-linked HMDA tables."""
+
     # Deduplicate matches
     m = prepare_unique_matches(matches_df, keep_top_purchase=keep_top_purchase)
 
@@ -82,16 +95,25 @@ def global_match_rates(
 
     # Join metadata needed for group rates
     mo = (
-        m.join(originations_df.select(["origination_id","activity_year","lei","loan_type"]),
-               on="origination_id", how="left")
-         .rename({"activity_year":"orig_activity_year"})
+        m.join(
+            originations_df.select(
+                ["origination_id", "activity_year", "lei", "loan_type"]
+            ),
+            on="origination_id",
+            how="left",
+        ).rename({"activity_year": "orig_activity_year"})
     )
 
     # bring purchaser_type if available
-    purchaser_cols = _safe_select(purchases_df, ["purchase_id","activity_year","purchaser_type"])
+    purchaser_cols = _safe_select(
+        purchases_df, ["purchase_id", "activity_year", "purchaser_type"]
+    )
     if purchaser_cols:
-        mo = mo.join(purchases_df.select(purchaser_cols), on="purchase_id", how="left") \
-               .rename({"activity_year":"purc_activity_year"})
+        mo = mo.join(
+            purchases_df.select(purchaser_cols),
+            on="purchase_id",
+            how="left",
+        ).rename({"activity_year": "purc_activity_year"})
 
     def _rate_by(group_cols: list[str], base_df: pl.DataFrame, base_key: str):
         # base: denominator distinct units from base_df over the same grouping
