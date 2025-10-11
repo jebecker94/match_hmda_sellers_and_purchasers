@@ -10,6 +10,7 @@ This repository bundles the scripts that the Becker research group uses to pair 
 - `scripts/match_hmda_sellers_purchasers_post2018.py` – multi-round workflow for the post-2018 expanded HMDA dataset that incrementally refines candidate matches and exports parquet crosswalks and diagnostics.【F:scripts/match_hmda_sellers_purchasers_post2018.py†L20-L1188】
 - `scripts/top_counterparty_summary.py` – post-processing helpers that rank the most frequent seller/purchaser pairings from the final matched loan table, optionally returning institution names alongside IDs.【F:scripts/top_counterparty_summary.py†L1-L141】
 - `scripts/match_statistics.py` – Polars-based utilities for calculating overall and grouped match rates once you have originations, purchases, and match linkage tables available.【F:scripts/match_statistics.py†L1-L141】
+- `scripts/unmatched_analysis.py` – Polars profiling helpers that flag unmatched seller and purchaser records and compare their characteristics to matched loans.【F:scripts/unmatched_analysis.py†L1-L341】
 
 ## Data requirements
 
@@ -72,6 +73,27 @@ The helper returns two data frames: the first lists each seller alongside its to
 ## Computing match statistics
 
 `scripts/match_statistics.py` provides a lightweight summary layer for analysts who prefer to explore match rates in Polars after producing a seller–purchaser crosswalk. Load your originations, purchases, and linkage tables (each as a Polars `DataFrame`) and call `global_match_rates` to obtain overall metrics as well as grouped breakouts by year, lender LEI, loan type, and—when available—purchaser type.【F:scripts/match_statistics.py†L33-L141】 The helper automatically deduplicates multiple purchaser links per origination (keeping the highest `match_score` when present) and returns a dictionary of `DataFrame` objects you can export or chart as needed.【F:scripts/match_statistics.py†L61-L134】
+
+## Analyzing unmatched records
+
+When diagnosing coverage gaps, use `scripts/unmatched_analysis.py` to surface the originations and purchases that never link in your match crosswalk.【F:scripts/unmatched_analysis.py†L109-L341】 The module expects seller (`action_taken == 1`) and purchaser (`action_taken == 6`) tables that retain the HMDA `HMDAIndex` identifier alongside loan characteristics such as `loan_type`, `loan_amount`, and `is_rural_county` (if available). Run:
+
+```python
+import polars as pl
+from unmatched_analysis import (
+    profile_unmatched_originations,
+    profile_unmatched_purchases,
+)
+
+# originations = pl.read_parquet(...)
+# purchases = pl.read_parquet(...)
+# matches = pl.read_parquet(...)
+
+originations_report = profile_unmatched_originations(originations, matches, numeric_cols=["loan_amount", "property_value"])
+purchases_report = profile_unmatched_purchases(purchases, matches, top_n=20)
+```
+
+`profile_unmatched_originations` returns product mix, rural splits, and standardized mean differences versus matched loans, while `profile_unmatched_purchases` highlights the institutions and purchaser types responsible for the remaining unmatched volume.【F:scripts/unmatched_analysis.py†L109-L341】 Each function outputs Polars `DataFrame` objects that you can export to parquet/CSV or convert to pandas for visualization.
 
 ## Extending the pipeline
 
